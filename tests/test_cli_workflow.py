@@ -108,6 +108,7 @@ def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
     assert packet_path.is_file()
     assert contact_sheet == packet_dir / "contact-sheet.jpg"
     assert contact_sheet.is_file()
+    assert packet["face_sheet"] is None
     packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
     assert packet_payload["visible"][0]["source_path"] == str(photo.resolve())
     assert packet_payload["visible"][0]["annotated_path"] == "media/01.jpg"

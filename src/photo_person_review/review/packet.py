@@ -210,6 +210,7 @@ def build_review_packet(
     packet_id = packet_id or out.name
     visible: list[dict[str, Any]] = []
     tiles: list[Any] = []
+    face_tiles: list[Any] = []
     tile_size = (360, 280)
 
     for index, item in enumerate(items, 1):
@@ -229,6 +230,21 @@ def build_review_packet(
             face_crop.thumbnail((600, 600), Image.Resampling.LANCZOS)
             face_path = out / "faces" / f"{label}-face-{face_index:02d}.jpg"
             _save_private(face_crop, face_path)
+            face_tile_size = (180, 200)
+            face_tile = Image.new("RGB", face_tile_size, (35, 35, 35))
+            face_preview = face_crop.copy()
+            face_preview.thumbnail((180, 176), Image.Resampling.LANCZOS)
+            face_tile.paste(
+                face_preview,
+                (
+                    (face_tile_size[0] - face_preview.width) // 2,
+                    24 + (176 - face_preview.height) // 2,
+                ),
+            )
+            face_draw = ImageDraw.Draw(face_tile)
+            face_draw.rectangle((0, 0, face_tile_size[0], 24), fill=(0, 0, 0))
+            face_draw.text((6, 5), f"{label}/F{face_index}", fill=(255, 255, 255))
+            face_tiles.append(face_tile)
             face_entries.append(
                 {
                     "face_id": face.face_id,
@@ -290,11 +306,25 @@ def build_review_packet(
         sheet.paste(tile, ((i % columns) * tile_size[0], (i // columns) * tile_size[1]))
     sheet_path = out / "contact-sheet.jpg"
     _save_private(sheet, sheet_path)
+    face_sheet_path: Path | None = None
+    if face_tiles:
+        face_columns = 5
+        face_rows = (len(face_tiles) + face_columns - 1) // face_columns
+        face_sheet = Image.new(
+            "RGB",
+            (face_columns * 180, face_rows * 200),
+            (25, 25, 25),
+        )
+        for index, face_tile in enumerate(face_tiles):
+            face_sheet.paste(face_tile, ((index % face_columns) * 180, (index // face_columns) * 200))
+        face_sheet_path = out / "face-sheet.jpg"
+        _save_private(face_sheet, face_sheet_path)
     packet = {
         "packet_id": packet_id,
         "strategy": strategy,
         "created_at": datetime.now().astimezone().isoformat(),
         "contact_sheet": str(sheet_path.relative_to(out)),
+        "face_sheet": str(face_sheet_path.relative_to(out)) if face_sheet_path else None,
         "visible": visible,
     }
     packet_path = out / "packet.json"

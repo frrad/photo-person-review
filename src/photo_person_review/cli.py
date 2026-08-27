@@ -606,6 +606,9 @@ def review_packet(
             {
                 "packet_path": str(packet_path.resolve()),
                 "contact_sheet": str((packet_path.parent / payload["contact_sheet"]).resolve()),
+                "face_sheet": str((packet_path.parent / payload["face_sheet"]).resolve())
+                if payload.get("face_sheet")
+                else None,
                 "count": len(payload["visible"]),
                 "packet": payload,
             }

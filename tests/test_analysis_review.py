@@ -24,6 +24,7 @@ def test_packet_maps_labels_and_renders_exif_corrected_derivatives(tmp_path: Pat
     assert visible["media_id"] == "stable-media"
     assert visible["faces"][0]["face_id"] == "face-1"
     assert (out / packet["contact_sheet"]).is_file()
+    assert (out / packet["face_sheet"]).is_file()
     assert (out / visible["annotated_path"]).is_file()
     assert (out / visible["faces"][0]["path"]).is_file()
     assert (out / visible["people"][0]["path"]).is_file()
