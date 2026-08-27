@@ -1,0 +1,4 @@
+interface:
+  display_name: "Photo Person Review"
+  short_description: "Resume local person review from the catalog"
+  default_prompt: "Use $photo-person-review to resume reviewing the latest photo batch."
