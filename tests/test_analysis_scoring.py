@@ -10,6 +10,17 @@ from photo_person_review.analysis import (
 from photo_person_review.review import ReviewMedia, select_packet_media
 
 
+def test_orthogonal_vectors_do_not_create_positive_evidence():
+    score = score_candidate(
+        media_id="m1",
+        batch_id="b1",
+        faces=[FaceObservation("m1", "f1", (0, 0, 1, 1), embedding=(1.0, 0.0))],
+        positive_face_references=[("ref", (0.0, 1.0))],
+    )
+    assert score.components.face == 0.0
+    assert score.score == 0.0
+
+
 def test_face_and_appearance_are_explainable_and_appearance_is_batch_scoped():
     face = FaceObservation("m1", "f1", (0, 0, 10, 10), embedding=(1.0, 0.0))
     score = score_candidate(

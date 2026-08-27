@@ -25,7 +25,9 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
 
 
 def _positive_similarity(value: float) -> float:
-    return max(0.0, min(1.0, (value + 1.0) / 2.0))
+    # Orthogonal embeddings carry no positive evidence. Mapping [-1, 1] into
+    # [0, 1] would incorrectly give unrelated vectors a 0.5 baseline.
+    return max(0.0, min(1.0, value))
 
 
 @dataclass(frozen=True)

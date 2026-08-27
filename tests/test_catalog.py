@@ -64,6 +64,15 @@ def test_invalid_sha_and_decision_are_rejected(tmp_path):
             catalog.record_decision("person-1", photo_id, "maybe")
 
 
+def test_target_creation_is_idempotent_and_can_add_a_label(tmp_path):
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        assert catalog.create_target("person-1") == "person-1"
+        assert catalog.create_target("person-1", "Person") == "person-1"
+        row = catalog.connection.execute("SELECT label FROM targets WHERE target_id='person-1'").fetchone()
+        assert row["label"] == "Person"
+        assert catalog.counts()["targets"] == 1
+
+
 def test_review_store_uses_core_targets_decisions_and_reference_events(tmp_path):
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
         photo_id = catalog.upsert_photo("d" * 64)

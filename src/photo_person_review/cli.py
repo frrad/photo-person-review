@@ -422,6 +422,8 @@ def decide(
 ) -> None:
     """Append an accept, reject, or unsure event for one or more photos."""
 
+    if actor != "user":
+        raise typer.BadParameter("ppr decide records authoritative user decisions; --actor must be user")
     _, catalog = _catalog(workspace)
     try:
         tag_name = f"person:{target_id}:presence"

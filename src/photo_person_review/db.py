@@ -416,7 +416,11 @@ class Catalog:
     ) -> str:
         with self.transaction() as db:
             db.execute(
-                "INSERT INTO targets VALUES (?, ?, ?, ?)",
+                """INSERT INTO targets VALUES (?, ?, ?, ?)
+                   ON CONFLICT(target_id) DO UPDATE SET
+                     label=COALESCE(excluded.label,targets.label),
+                     metadata_json=CASE WHEN excluded.metadata_json='{}'
+                       THEN targets.metadata_json ELSE excluded.metadata_json END""",
                 (target_id, label, utc_now(), self._json(metadata or {})),
             )
         return target_id
