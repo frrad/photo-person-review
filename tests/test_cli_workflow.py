@@ -1,0 +1,143 @@
+"""End-to-end CLI contract using synthetic images only."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+pytest.importorskip("PIL")
+from PIL import Image  # noqa: E402
+
+from photo_person_review.cli import app  # noqa: E402
+from photo_person_review.db import Catalog  # noqa: E402
+
+runner = CliRunner()
+
+
+def _write_photo(path: Path, color: tuple[int, int, int]) -> None:
+    Image.new("RGB", (40, 30), color).save(path, format="JPEG", quality=90)
+
+
+def _json_result(result):
+    assert result.exit_code == 0, result.stdout
+    return json.loads(result.stdout)
+
+
+def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    photo = source / "one.jpg"
+    _write_photo(photo, (20, 40, 60))
+    workspace = tmp_path / "workspace"
+    workspace_arg = ["--workspace", str(workspace)]
+
+    initialized = _json_result(runner.invoke(app, ["init", *workspace_arg]))
+    assert initialized["counts"]["photos"] == 0
+    first = _json_result(runner.invoke(app, ["import", str(source), "--source-id", "album", *workspace_arg]))
+    assert first["counts"] == {
+        "errors": 0,
+        "missing": 0,
+        "new": 1,
+        "replaced": 0,
+        "unchanged": 0,
+    }
+    second = _json_result(runner.invoke(app, ["import", str(source), "--source-id", "album", *workspace_arg]))
+    assert second["counts"]["unchanged"] == 1
+
+    photo_id = hashlib.sha256(photo.read_bytes()).hexdigest()
+    with Catalog(workspace / "catalog.sqlite3") as catalog:
+        counts = catalog.counts()
+        assert counts["photos"] == 1
+        assert counts["source_files"] == 2
+        assert counts["photo_metadata"] > 1
+        columns = {row["name"] for row in catalog.connection.execute("PRAGMA table_info(photos)")}
+        assert not columns.intersection({"image", "image_bytes", "photo_bytes", "blob"})
+
+    target = _json_result(
+        runner.invoke(
+            app,
+            ["target", "create", "child", "--label", "Child", *workspace_arg],
+        )
+    )
+    assert target == {"label": "Child", "target_id": "child"}
+    tag = _json_result(
+        runner.invoke(
+            app,
+            ["tag", "define", "manual-note", "--description", "test", *workspace_arg],
+        )
+    )
+    assert tag["name"] == "manual-note"
+
+    batches = _json_result(runner.invoke(app, ["batches", *workspace_arg]))
+    assert len(batches) == 2
+    batch_id = batches[-1]["batch_id"]
+    packet_dir = tmp_path / "packet"
+    packet = _json_result(
+        runner.invoke(
+            app,
+            [
+                "review",
+                "packet",
+                "--target",
+                "child",
+                "--batch",
+                batch_id,
+                "--strategy",
+                "likely",
+                "--output",
+                str(packet_dir),
+                *workspace_arg,
+            ],
+        )
+    )
+    packet_path = Path(packet["packet_path"])
+    contact_sheet = Path(packet["contact_sheet"])
+    assert packet_path == packet_dir / "packet.json"
+    assert packet_path.is_file()
+    assert contact_sheet == packet_dir / "contact-sheet.jpg"
+    assert contact_sheet.is_file()
+    packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
+    assert packet_payload["visible"][0]["source_path"] == str(photo.resolve())
+    assert packet_payload["visible"][0]["annotated_path"] == "media/01.jpg"
+    assert not (workspace / "thumbnails").exists()
+
+    decision = _json_result(
+        runner.invoke(
+            app,
+            ["decide", "child", "accept", photo_id, "--actor", "user", *workspace_arg],
+        )
+    )
+    assert decision["photo_ids"] == [photo_id]
+    assert len(decision["decision_ids"]) == 1
+    assert len(decision["tag_assignment_ids"]) == 1
+
+    export_path = tmp_path / "export.json"
+    exported = _json_result(
+        runner.invoke(
+            app,
+            [
+                "export",
+                "--output",
+                str(export_path),
+                "--format",
+                "json",
+                "--target",
+                "child",
+                *workspace_arg,
+            ],
+        )
+    )
+    assert exported["row_count"] == 1
+    rows = json.loads(export_path.read_text(encoding="utf-8"))
+    assert rows[0]["photo_id"] == photo_id
+    assert rows[0]["decision"]["decision"] == "accept"
+    assert any(tag_row["value"] == "accept" for tag_row in rows[0]["tags"])
+
+    with Catalog(workspace / "catalog.sqlite3") as catalog:
+        assert catalog.counts()["photos"] == 1
+        assert catalog.counts()["decisions"] == 1
+        assert catalog.counts()["tag_assignments"] == 1

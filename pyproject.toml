@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photo-person-review"
+version = "0.1.0"
+description = "Local-first catalog and review tooling for finding a person in photo batches"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+authors = [{ name = "Photo Person Review contributors" }]
+dependencies = [
+  "Pillow>=11,<13",
+  "platformdirs>=4.2",
+  "typer>=0.12",
+]
+
+[project.optional-dependencies]
+vision = [
+  "opencv-python-headless>=4.10,<5",
+]
+dev = [
+  "mypy>=1.11,<2",
+  "pytest>=8.0,<10",
+  "ruff>=0.6,<1",
+]
+
+[project.scripts]
+ppr = "photo_person_review.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/photo_person_review"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["photo_person_review"]
+mypy_path = "src"

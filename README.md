@@ -1,39 +1,85 @@
 # Photo Person Review
 
-Photo Person Review is a local-first tool for semi-automatically finding photos that contain one configured person. It is designed for recurring large daily or batch downloads where manually reviewing and tagging every image is impractical: a reviewer confirms a few clear examples, and the tool ranks the remaining images using local face evidence plus short-lived same-day appearance signals.
+Photo Person Review is a local-first, CLI-only catalog and review tool for
+finding photos that contain a configured person. It is intended for recurring
+daily or event batches: approved face references carry forward, while outfit,
+burst, and context evidence remains scoped to the batch where it was observed.
 
-This repository is intentionally generic and currently at the planning stage. It is not affiliated with any photo provider, downloader, school, or cloud photo service.
+The reviewer interface can be an agent such as Codex. The CLI produces
+machine-readable review packets plus temporary annotated contact sheets and
+crops; the agent shows those artifacts to a person and records their explicit
+accept, reject, or unsure decisions.
 
-## Goals
+This project is source-agnostic and is not affiliated with a photo provider,
+downloader, school, or cloud vision service.
 
-- Reduce a 100-photo day to a small, fast review queue instead of requiring every image to be hand-tagged.
-- Keep photos, face crops, embeddings, annotations, and model outputs local by default.
-- Preserve human approval and the evidence behind each suggestion.
-- Accept ordinary folders and optional generic media manifests.
-- Make cloud vision an explicit, optional fallback rather than a requirement.
+## Data model
 
-## Planned workflow
+The SQLite catalog is designed to grow over time. It records stable content
+hashes, source-path observations, batches, normalized metadata, provider hints,
+detected regions, numeric features, evidence, tags, and append-only decisions.
+Re-importing a batch adds an observation without duplicating an existing photo.
 
-1. Import a folder or manifest and group media by capture date.
-2. Confirm a few obvious reference images for the configured person.
-3. Rank candidates using local face matching and short-lived same-day signals: outfit, person-crop and context similarity, capture time, and burst/near-duplicate relationships.
-4. Human-review the ranked queue with accept, reject, and unsure controls; suggestions never silently become tags.
-5. Store the evidence, reference IDs, confidence, and model versions behind each decision.
-6. Export confirmed annotations or sidecars without modifying source media.
+The catalog never stores encoded photos, thumbnails, or crop bytes. Source
+photos remain in their original archive and are opened read-only. Annotated
+images, contact sheets, and crops are regenerated into caller-selected temporary
+directories when review is needed.
 
-The first milestone will be a small local review gallery plus a durable annotation format. Model and UI choices are deliberately not locked in yet.
+## Intended workflow
 
-## Privacy and safety
+```console
+ppr init --workspace /private/path/to/catalog
+ppr import /private/path/to/archive --manifest /private/path/to/media.json
+ppr analyze --new
+ppr target create --id target-1
+ppr review packet --target target-1 --strategy reference-seeding --output "$TMPDIR"
+ppr decide --target target-1 --accept PHOTO_ID --actor user
+ppr export --target target-1 --format json
+```
 
-Do not commit personal photos, face crops, embeddings, databases, credentials, or model outputs. The repository includes conservative ignore rules, but review `git status` before every commit. Cloud vision is optional only: any remote model integration must be explicitly enabled, clearly labeled, and documented with its data-handling implications.
+The exact command surface is under active implementation. Commands intended for
+agent use emit stable JSON on standard output and diagnostics on standard error.
 
-## Source-agnostic boundary
+## Evidence and decisions
 
-The project consumes ordinary local folders and optional generic media manifests. A downloader or photo service remains responsible for acquisition; this companion owns local derived data, review state, ranking, and export. It has no dependency on a particular photo provider.
+- User-approved face references and hard negatives persist across batches.
+- Outfit and person-crop evidence is batch-local by default.
+- Local face, appearance, time, burst, and context signals rank candidates.
+- Imported provider tags and future VLM results are non-authoritative evidence.
+- Suggestions never silently become user tags.
+- Decisions retain their actor, evidence, timestamp, and supersession history.
+
+## Optional remote vision
+
+The first milestone is fully local. A backend-neutral vision-evidence contract
+allows an explicitly enabled OpenRouter VLM integration later. Remote analysis
+must require affirmative upload consent, strip image metadata, send the minimum
+necessary crops, enforce configured provider privacy constraints, and remain
+advisory. API keys and photo bytes are never stored in the catalog.
+
+## Generic and Vidigami inputs
+
+Ordinary folders are the primary input. Optional generic manifests may attach
+opaque external IDs and tags. The Vidigami adapter reads its JSON report and
+matches `SHA-256(media_id)` to the downloader's hash-named archive files. It
+does not import the downloader package, read its credentials, contact its API,
+or modify its state.
+
+## Privacy
+
+Never commit personal photos, generated review images, embeddings, databases,
+credentials, local manifests, or model outputs. Before committing, run:
+
+```console
+python scripts/privacy_check.py
+```
+
+For additional protection, create an ignored `.privacy-patterns` file with one
+regular expression per private value or pattern to reject.
 
 ## Status
 
-Early planning. Contributions and implementation proposals are welcome.
+Initial implementation.
 
 ## License
 
