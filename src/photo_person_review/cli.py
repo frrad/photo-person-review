@@ -20,7 +20,7 @@ from .analysis import (
 )
 from .config import CatalogConfig
 from .db import Catalog
-from .exporters import catalog_rows, write_csv, write_json, write_symlinks
+from .exporters import catalog_rows, write_csv, write_hardlinks, write_json, write_symlinks
 from .importers import CatalogImportRepository, FolderImporter, VidigamiAdapter
 from .review import ReviewMedia, ReviewStore, build_review_packet
 
@@ -535,12 +535,12 @@ def decide(
 @app.command("export")
 def export_catalog(
     output: Annotated[Path, typer.Option("--output")],
-    format: Annotated[str, typer.Option("--format")] = "json",
+    format: Annotated[str, typer.Option("--format")] = "hardlinks",
     target_id: Annotated[str | None, typer.Option("--target")] = None,
     filename_prefix: Annotated[str | None, typer.Option("--filename-prefix")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
-    """Export catalog metadata or reconcile a durable symlink photo export."""
+    """Export catalog metadata or reconcile a durable photo link export."""
 
     _, catalog = _catalog(workspace)
     try:
@@ -559,8 +559,15 @@ def export_catalog(
             if target is None:
                 raise typer.BadParameter(f"unknown target: {target_id}")
             _emit(write_symlinks(catalog.connection, target_id, output, filename_prefix=filename_prefix))
+        elif format == "hardlinks":
+            if target_id is None:
+                raise typer.BadParameter("--target is required when --format hardlinks")
+            target = catalog.connection.execute("SELECT 1 FROM targets WHERE target_id=?", (target_id,)).fetchone()
+            if target is None:
+                raise typer.BadParameter(f"unknown target: {target_id}")
+            _emit(write_hardlinks(catalog.connection, target_id, output, filename_prefix=filename_prefix))
         else:
-            raise typer.BadParameter("--format must be json, csv, or symlinks")
+            raise typer.BadParameter("--format must be json, csv, hardlinks, or symlinks")
     finally:
         catalog.close()
 

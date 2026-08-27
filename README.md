@@ -44,24 +44,28 @@ ppr rank --target target-1 --batch BATCH_ID --min-face-area-ratio 0
 ppr review packet --target target-1 --strategy reference-seeding --output "$TMPDIR"
 ppr decide --target target-1 --accept PHOTO_ID --actor user
 ppr export --target target-1 --format json
-# Reconcile the durable, going-forward photo export.
-ppr export --target target-1 --format symlinks --output "$HOME/Pictures/chloevidigami" \
+# Reconcile the durable, going-forward hard-link photo export (the default).
+ppr export --target target-1 --output "$HOME/Pictures/chloevidigami" \
   --filename-prefix ppr_chloevidigami
 ```
 
 The exact command surface is under active implementation. Commands intended for
 agent use emit stable JSON on standard output and diagnostics on standard error.
 
-### Durable symlink exports
+### Durable hard-link and symlink exports
 
-Use `--format symlinks` for a persistent export that can be consumed by a photo
-viewer or another local workflow. The output directory is created if needed and
-contains links named with a sanitized prefix, capture timestamp, full stable
-photo ID, and current source extension, for example
+Use `--format hardlinks` (the default) for a persistent export of ordinary files
+that can be uploaded to Google Photos without copying photo bytes. Hard links
+require the source archive and output directory to be on the same filesystem;
+cross-device items are reported and skipped, with no copy fallback. Use
+`--format symlinks` when a local workflow specifically needs symlinks. The
+output directory is created if needed and contains entries named with a
+sanitized prefix, capture timestamp, full stable photo ID, and current source
+extension, for example
 `ppr_chloevidigami_2026-08-26_092328_0123...cdef.jpg`, along with a small hidden
 ownership manifest. Re-running the command reconciles
 these managed links with the current target positives: new links are added,
-changed source paths are updated, and stale managed links are removed.
+changed source paths are updated, and stale managed links are removed safely.
 
 Pass `--filename-prefix` to namespace the export for exact filename searches;
 the value is lowercased and reduced to `[a-z0-9]+` components joined by
@@ -73,11 +77,14 @@ on the next sync while preserving unknown links.
 The current positive set is the union of active positive face references and
 the latest `accept` decisions. A photo whose latest decision is `reject` is
 excluded even if it has older acceptance evidence. Source photos remain in
-place; the export never copies or opens photo bytes. Missing source paths and
-regular-file or directory collisions are reported in the JSON result and
-skipped safely. Arbitrary files, directories, and symlinks with non-managed
-names are preserved. Existing review packet directories remain ephemeral and
-are separate from this export.
+place; the export never copies or opens photo bytes. Missing source paths,
+cross-device hard-link attempts, and regular-file or directory collisions are
+reported in the JSON result and skipped safely. Arbitrary files, directories,
+and symlinks with non-managed names are preserved. Hard-link ownership records
+contain source device/inode identity, so stale entries are removed only while
+that identity still matches; replacing a managed filename with an arbitrary
+regular file is therefore safe. Existing review packet directories remain
+ephemeral and are separate from this export.
 
 See [.codex/skills/photo-person-review/references/operations.md](.codex/skills/photo-person-review/references/operations.md)
 for the recurring review/export procedure and safety notes.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -147,16 +148,14 @@ def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
     assert rows[0]["decision"]["decision"] == "accept"
     assert any(tag_row["value"] == "accept" for tag_row in rows[0]["tags"])
 
-    symlink_dir = tmp_path / "chloevidigami"
-    symlink_export = _json_result(
+    hardlink_dir = tmp_path / "chloevidigami"
+    hardlink_export = _json_result(
         runner.invoke(
             app,
             [
                 "export",
                 "--output",
-                str(symlink_dir),
-                "--format",
-                "symlinks",
+                str(hardlink_dir),
                 "--target",
                 "child",
                 "--filename-prefix",
@@ -165,13 +164,14 @@ def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
             ],
         )
     )
-    assert symlink_export["created_count"] == 1
-    exported_links = list(symlink_dir.glob(f"ppr_child_export_*_{photo_id}.jpg"))
+    assert hardlink_export["format"] == "hardlinks"
+    assert hardlink_export["created_count"] == 1
+    exported_links = list(hardlink_dir.glob(f"ppr_child_export_*_{photo_id}.jpg"))
     assert len(exported_links) == 1
     exported_link = exported_links[0]
-    assert exported_link.is_symlink()
-    assert exported_link.resolve() == photo.resolve()
-    assert (symlink_dir / ".ppr-symlink-export.json").is_file()
+    assert exported_link.is_file() and not exported_link.is_symlink()
+    assert os.path.samefile(exported_link, photo)
+    assert (hardlink_dir / ".ppr-symlink-export.json").is_file()
 
     with Catalog(workspace / "catalog.sqlite3") as catalog:
         assert catalog.counts()["photos"] == 1

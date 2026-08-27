@@ -1,10 +1,11 @@
 import csv
+import errno
 import json
 import os
 from pathlib import Path
 
 from photo_person_review.db import Catalog
-from photo_person_review.exporters import catalog_rows, write_csv, write_json, write_symlinks
+from photo_person_review.exporters import catalog_rows, write_csv, write_hardlinks, write_json, write_symlinks
 from photo_person_review.review import ReviewStore
 
 
@@ -166,3 +167,113 @@ def test_symlink_export_reconciles_only_managed_links_and_preserves_collisions(t
             "regular_file_collision",
             "unmanaged_symlink_collision",
         }
+
+
+def test_hardlink_export_is_idempotent_and_records_inode_ownership(tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"photo bytes")
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        source_id = catalog.create_source("folder")
+        run_id = catalog.create_import_run(source_id)
+        photo_id = catalog.upsert_photo("a" * 64, capture_time="2026-08-26T09:23:28")
+        catalog.observe_source_file(source_id, photo_id, str(source), import_run_id=run_id)
+        target_id = catalog.create_target("chloe", label="Chloe")
+        catalog.record_decision(target_id, photo_id, "accept")
+        destination = tmp_path / "export"
+
+        first = write_hardlinks(catalog.connection, target_id, destination)
+        second = write_hardlinks(catalog.connection, target_id, destination)
+
+    name = f"chloe_2026-08-26_092328_{photo_id}.jpg"
+    exported = destination / name
+    assert exported.is_file() and not exported.is_symlink()
+    assert os.path.samefile(exported, source)
+    assert first["created_count"] == 1
+    assert second["unchanged_count"] == 1
+    manifest = json.loads((destination / ".ppr-symlink-export.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == 3
+    assert manifest["managed"][name]["kind"] == "hardlink"
+    assert manifest["managed"][name]["source_identity"]["ino"] == source.stat().st_ino
+
+
+def test_hardlink_export_migrates_manifest_symlink_and_preserves_stored_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"photo bytes")
+    photo_id = "b" * 64
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        source_id = catalog.create_source("folder")
+        run_id = catalog.create_import_run(source_id)
+        catalog.upsert_photo(photo_id, capture_time="2026-08-26T09:23:28")
+        catalog.observe_source_file(source_id, photo_id, str(source), import_run_id=run_id)
+        target_id = catalog.create_target("chloe", label="Chloe")
+        catalog.record_decision(target_id, photo_id, "accept")
+        destination = tmp_path / "export"
+        destination.mkdir()
+        old_name = f"ppr_custom_2026-08-26_092328_{photo_id}.jpg"
+        os.symlink(source, destination / old_name)
+        (destination / ".ppr-symlink-export.json").write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "target_id": target_id,
+                    "filename_prefix": "ppr_custom",
+                    "managed_names": [old_name],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = write_hardlinks(catalog.connection, target_id, destination)
+
+    exported = destination / old_name
+    assert result["filename_prefix"] == "ppr_custom"
+    assert result["updated_count"] == 1
+    assert exported.is_file() and not exported.is_symlink()
+    assert os.path.samefile(exported, source)
+
+
+def test_hardlink_stale_removal_does_not_delete_replaced_regular_file(tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"photo bytes")
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        source_id = catalog.create_source("folder")
+        run_id = catalog.create_import_run(source_id)
+        photo_id = catalog.upsert_photo("c" * 64, capture_time="2026-08-26T09:23:28")
+        catalog.observe_source_file(source_id, photo_id, str(source), import_run_id=run_id)
+        target_id = catalog.create_target("chloe")
+        catalog.record_decision(target_id, photo_id, "accept")
+        destination = tmp_path / "export"
+        write_hardlinks(catalog.connection, target_id, destination)
+        name = f"chloe_2026-08-26_092328_{photo_id}.jpg"
+        exported = destination / name
+        exported.unlink()
+        exported.write_bytes(b"user-owned")
+        catalog.record_decision(target_id, photo_id, "reject")
+
+        result = write_hardlinks(catalog.connection, target_id, destination)
+
+    assert result["removed_count"] == 0
+    assert result["conflict_count"] == 0
+    assert exported.read_bytes() == b"user-owned"
+
+
+def test_hardlink_export_reports_cross_device_without_copy(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"photo bytes")
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        source_id = catalog.create_source("folder")
+        run_id = catalog.create_import_run(source_id)
+        photo_id = catalog.upsert_photo("d" * 64)
+        catalog.observe_source_file(source_id, photo_id, str(source), import_run_id=run_id)
+        target_id = catalog.create_target("chloe")
+        catalog.record_decision(target_id, photo_id, "accept")
+
+        def fail_link(*args, **kwargs):
+            raise OSError(errno.EXDEV, "cross-device link")
+
+        monkeypatch.setattr(os, "link", fail_link)
+        result = write_hardlinks(catalog.connection, target_id, tmp_path / "export")
+
+    assert result["created_count"] == 0
+    assert result["skipped"][0]["reason"] == "cross_device"
+    assert not any(path.is_file() for path in (tmp_path / "export").iterdir() if not path.name.startswith("."))

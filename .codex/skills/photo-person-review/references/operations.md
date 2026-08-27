@@ -117,11 +117,11 @@ uv run ppr decide TARGET_ID unsure PHOTO_ID [PHOTO_ID ...] --actor user
 ## Reconcile the durable Chloe export
 
 Review packets and their annotated media are ephemeral batch-review artifacts.
-The going-forward handoff to a local photo workflow is a durable symlink
+The going-forward handoff to a local photo workflow is a durable hard-link
 directory, reconciled after imports and the latest decisions:
 
 ```console
-uv run ppr export --target TARGET_ID --format symlinks \
+uv run ppr export --target TARGET_ID \
   --output "$HOME/Pictures/chloevidigami" \
   --filename-prefix ppr_chloevidigami
 ```
@@ -142,10 +142,15 @@ used, falling back to the target ID or `photo`. Missing or invalid
 changing it safely migrates prior managed names on the next sync while
 preserving unknown links.
 
-The command creates symlinks plus a small hidden ownership manifest; it never
-copies or opens photo bytes. Missing source paths and regular-file/directory
-collisions are skipped and reported in JSON. Arbitrary files, directories, and
-symlinks not listed in the prior matching manifest are preserved. Inspect
+The default command creates hard links plus a small hidden ownership manifest;
+it never copies or opens photo bytes. Hard links require the source and output
+directory to be on the same filesystem. Use `--format symlinks` only for a
+workflow that needs symlinks. Missing source paths, cross-device hard-link
+attempts, and regular-file/directory collisions are skipped and reported in
+JSON. Arbitrary files, directories, and symlinks not listed in the prior
+matching manifest are preserved. Hard-link ownership records include source
+device/inode identity; stale hard links are removed only when that identity
+still matches. Inspect
 `created_count`, `updated_count`, `unchanged_count`, `removed_count`,
 `skipped_count`, `conflict_count`, and the `skipped`/`conflicts` detail arrays
 before handing the directory to another workflow. If the manifest is absent or
