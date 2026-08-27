@@ -25,6 +25,10 @@ photos remain in their original archive and are opened read-only. Annotated
 images, contact sheets, and crops are regenerated into caller-selected temporary
 directories when review is needed.
 
+For conversational review, present one full-size face crop per question. Use
+the contact and face sheets only as packet indexes, and show the annotated
+context photo separately when the crop alone is ambiguous.
+
 ## Intended workflow
 
 ```console
