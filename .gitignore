@@ -1,0 +1,67 @@
+# Photos and derived media
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.heic
+*.heif
+*.webp
+*.avif
+*.tif
+*.tiff
+*.raw
+*.dng
+*.cr2
+*.cr3
+*.nef
+*.arw
+*.mp4
+*.mov
+*.avi
+media/
+photos/
+imports/
+exports/
+thumbnails/
+crops/
+
+# Private local state
+*.db
+*.sqlite
+*.sqlite3
+*.sqlite-journal
+*.embeddings
+embeddings/
+artifacts/
+outputs/
+data/
+local/
+.cache/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+config.local.*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+.next/
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
