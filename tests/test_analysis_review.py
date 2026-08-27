@@ -27,5 +27,13 @@ def test_packet_maps_labels_and_renders_exif_corrected_derivatives(tmp_path: Pat
     assert (out / packet["face_sheet"]).is_file()
     assert (out / visible["annotated_path"]).is_file()
     assert (out / visible["faces"][0]["path"]).is_file()
+    assert (out / visible["faces"][0]["context_path"]).is_file()
+    with (
+        Image.open(out / visible["faces"][0]["path"]) as tight,
+        Image.open(out / visible["faces"][0]["context_path"]) as context,
+    ):
+        assert context.width <= 1000
+        assert context.height <= 1000
+        assert context.width * context.height > tight.width * tight.height
     assert (out / visible["people"][0]["path"]).is_file()
     assert all("source" not in path.name for path in (out / "media").iterdir())

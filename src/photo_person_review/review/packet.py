@@ -180,6 +180,25 @@ def _crop(image: Any, box: tuple[int, int, int, int], *, pad: float = 0.18) -> A
     )
 
 
+def _context_crop(image: Any, box: tuple[int, int, int, int]) -> Any:
+    """Crop a face with head-and-shoulders context for ambiguous matches.
+
+    The face sits in the upper half of a portrait-oriented crop: equal one-face
+    margins on the sides, half a face above, and two-and-a-half faces below for
+    shoulders and clothing context. Image boundaries are respected, so this is
+    still useful for faces near an edge.
+    """
+    x, y, w, h = box
+    return image.crop(
+        (
+            max(0, round(x - w)),
+            max(0, round(y - h * 0.5)),
+            min(image.width, round(x + w * 2)),
+            min(image.height, round(y + h * 3.5)),
+        )
+    )
+
+
 def build_review_packet(
     media: Iterable[ReviewMedia],
     *,
@@ -230,6 +249,10 @@ def build_review_packet(
             face_crop.thumbnail((600, 600), Image.Resampling.LANCZOS)
             face_path = out / "faces" / f"{label}-face-{face_index:02d}.jpg"
             _save_private(face_crop, face_path)
+            context_crop = _context_crop(corrected, face.bbox)
+            context_crop.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
+            context_path = out / "faces" / f"{label}-face-{face_index:02d}-context.jpg"
+            _save_private(context_crop, context_path)
             face_tile_size = (180, 200)
             face_tile = Image.new("RGB", face_tile_size, (35, 35, 35))
             face_preview = face_crop.copy()
@@ -249,6 +272,7 @@ def build_review_packet(
                 {
                     "face_id": face.face_id,
                     "path": str(face_path.relative_to(out)),
+                    "context_path": str(context_path.relative_to(out)),
                     "bbox": list(face.bbox),
                 }
             )
