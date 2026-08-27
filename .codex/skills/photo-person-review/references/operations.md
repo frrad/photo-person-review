@@ -114,6 +114,34 @@ uv run ppr decide TARGET_ID reject PHOTO_ID [PHOTO_ID ...] --actor user
 uv run ppr decide TARGET_ID unsure PHOTO_ID [PHOTO_ID ...] --actor user
 ```
 
+## Reconcile the durable Chloe export
+
+Review packets and their annotated media are ephemeral batch-review artifacts.
+The going-forward handoff to a local photo workflow is a durable symlink
+directory, reconciled after imports and the latest decisions:
+
+```console
+uv run ppr export --target TARGET_ID --format symlinks \
+  --output "$HOME/photos/chloevidigami"
+```
+
+The destination is created if absent. Managed links are named with the full
+stable `photo_id` and current source extension (`<photo_id>.jpg`). The current
+set is the union of active positive face-reference photos and latest `accept`
+decisions, except that a latest `reject` excludes the photo even when it has
+older acceptance evidence. Re-running follows the newest present/replaced
+source observation, adds new links, updates changed links, and removes stale
+managed links.
+
+The command creates symlinks plus a small hidden ownership manifest; it never
+copies or opens photo bytes. Missing source paths and regular-file/directory
+collisions are skipped and reported in JSON. Arbitrary files, directories, and
+symlinks not listed in the prior matching manifest are preserved. Inspect
+`created_count`, `updated_count`, `unchanged_count`, `removed_count`,
+`skipped_count`, `conflict_count`, and the `skipped`/`conflicts` detail arrays
+before handing the directory to another workflow. If the manifest is absent or
+invalid, stale links are not removed and the manifest issue is reported.
+
 ## Verify implementation changes
 
 ```console

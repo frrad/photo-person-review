@@ -44,10 +44,34 @@ ppr rank --target target-1 --batch BATCH_ID --min-face-area-ratio 0
 ppr review packet --target target-1 --strategy reference-seeding --output "$TMPDIR"
 ppr decide --target target-1 --accept PHOTO_ID --actor user
 ppr export --target target-1 --format json
+# Reconcile the durable, going-forward photo export.
+ppr export --target target-1 --format symlinks --output "$HOME/photos/chloevidigami"
 ```
 
 The exact command surface is under active implementation. Commands intended for
 agent use emit stable JSON on standard output and diagnostics on standard error.
+
+### Durable symlink exports
+
+Use `--format symlinks` for a persistent export that can be consumed by a photo
+viewer or another local workflow. The output directory is created if needed and
+contains links named from the full stable photo ID plus the current source
+extension, for example `0123...cdef.jpg`, along with a small hidden ownership
+manifest. Re-running the command reconciles
+these managed links with the current target positives: new links are added,
+changed source paths are updated, and stale managed links are removed.
+
+The current positive set is the union of active positive face references and
+the latest `accept` decisions. A photo whose latest decision is `reject` is
+excluded even if it has older acceptance evidence. Source photos remain in
+place; the export never copies or opens photo bytes. Missing source paths and
+regular-file or directory collisions are reported in the JSON result and
+skipped safely. Arbitrary files, directories, and symlinks with non-managed
+names are preserved. Existing review packet directories remain ephemeral and
+are separate from this export.
+
+See [.codex/skills/photo-person-review/references/operations.md](.codex/skills/photo-person-review/references/operations.md)
+for the recurring review/export procedure and safety notes.
 
 Face analysis defaults to a 0.50 YuNet confidence threshold and resizes large
 photos to a 2000-pixel maximum side before YuNet/SFace. Detected boxes and

@@ -147,6 +147,28 @@ def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
     assert rows[0]["decision"]["decision"] == "accept"
     assert any(tag_row["value"] == "accept" for tag_row in rows[0]["tags"])
 
+    symlink_dir = tmp_path / "chloevidigami"
+    symlink_export = _json_result(
+        runner.invoke(
+            app,
+            [
+                "export",
+                "--output",
+                str(symlink_dir),
+                "--format",
+                "symlinks",
+                "--target",
+                "child",
+                *workspace_arg,
+            ],
+        )
+    )
+    assert symlink_export["created_count"] == 1
+    exported_link = symlink_dir / f"{photo_id}.jpg"
+    assert exported_link.is_symlink()
+    assert exported_link.resolve() == photo.resolve()
+    assert (symlink_dir / ".ppr-symlink-export.json").is_file()
+
     with Catalog(workspace / "catalog.sqlite3") as catalog:
         assert catalog.counts()["photos"] == 1
         assert catalog.counts()["decisions"] == 1

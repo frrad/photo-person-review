@@ -20,7 +20,7 @@ from .analysis import (
 )
 from .config import CatalogConfig
 from .db import Catalog
-from .exporters import catalog_rows, write_csv, write_json
+from .exporters import catalog_rows, write_csv, write_json, write_symlinks
 from .importers import CatalogImportRepository, FolderImporter, VidigamiAdapter
 from .review import ReviewMedia, ReviewStore, build_review_packet
 
@@ -539,18 +539,27 @@ def export_catalog(
     target_id: Annotated[str | None, typer.Option("--target")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
-    """Atomically export the current photo, metadata, tag, and decision view."""
+    """Export catalog metadata or reconcile a durable symlink photo export."""
 
     _, catalog = _catalog(workspace)
     try:
-        rows = catalog_rows(catalog.connection, target_id=target_id)
         if format == "json":
+            rows = catalog_rows(catalog.connection, target_id=target_id)
             written = write_json(output, rows)
+            _emit({"path": str(written.resolve()), "format": format, "row_count": len(rows)})
         elif format == "csv":
+            rows = catalog_rows(catalog.connection, target_id=target_id)
             written = write_csv(output, rows)
+            _emit({"path": str(written.resolve()), "format": format, "row_count": len(rows)})
+        elif format == "symlinks":
+            if target_id is None:
+                raise typer.BadParameter("--target is required when --format symlinks")
+            target = catalog.connection.execute("SELECT 1 FROM targets WHERE target_id=?", (target_id,)).fetchone()
+            if target is None:
+                raise typer.BadParameter(f"unknown target: {target_id}")
+            _emit(write_symlinks(catalog.connection, target_id, output))
         else:
-            raise typer.BadParameter("--format must be json or csv")
-        _emit({"path": str(written.resolve()), "format": format, "row_count": len(rows)})
+            raise typer.BadParameter("--format must be json, csv, or symlinks")
     finally:
         catalog.close()
 
