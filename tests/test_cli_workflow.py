@@ -12,7 +12,15 @@ from typer.testing import CliRunner
 pytest.importorskip("PIL")
 from PIL import Image  # noqa: E402
 
-from photo_person_review.cli import app  # noqa: E402
+from photo_person_review.analysis import (  # noqa: E402
+    AnalysisResult,
+    CatalogAnalysisRepository,
+    FaceObservation,
+)
+from photo_person_review.cli import (
+    _packet_media,  # noqa: E402
+    app,  # noqa: E402
+)
 from photo_person_review.db import Catalog  # noqa: E402
 
 runner = CliRunner()
@@ -141,3 +149,39 @@ def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
         assert catalog.counts()["photos"] == 1
         assert catalog.counts()["decisions"] == 1
         assert catalog.counts()["tag_assignments"] == 1
+
+
+def test_reference_seeding_prefers_clear_few_face_photos(tmp_path: Path) -> None:
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        source = catalog.create_source("folder")
+        run = catalog.create_import_run(source)
+        batch = catalog.create_batch(source)
+        ids = [character * 64 for character in ("a", "b", "c")]
+        for photo_id in ids:
+            catalog.upsert_photo(photo_id, width=1000, height=1000)
+            catalog.observe_source_file(
+                source,
+                photo_id,
+                f"/source/{photo_id[0]}.jpg",
+                import_run_id=run,
+            )
+            catalog.observe_batch_photo(batch, photo_id, import_run_id=run)
+        results = [
+            AnalysisResult(
+                ids[0],
+                batch,
+                faces=(FaceObservation(ids[0], "clear", (0, 0, 300, 300), 0.95),),
+            ),
+            AnalysisResult(
+                ids[1],
+                batch,
+                faces=tuple(FaceObservation(ids[1], f"crowd-{index}", (0, 0, 350, 350), 0.95) for index in range(10)),
+            ),
+            AnalysisResult(ids[2], batch),
+        ]
+        CatalogAnalysisRepository(catalog).save_results(results)
+        catalog.create_target("target")
+
+        selected = _packet_media(catalog, batch, "target", 3, "reference-seeding")
+
+    assert [item.media_id for item in selected] == ids

@@ -503,9 +503,9 @@ def _packet_media(
     if strategy not in decision_filters:
         choices = ", ".join(sorted(decision_filters))
         raise typer.BadParameter(f"--strategy must be one of: {choices}")
-    extra_filter = " AND face_seed_score IS NULL" if strategy == "no-face" else ""
+    extra_filter = " AND COALESCE(face_count,0)=0" if strategy == "no-face" else ""
     order_by = {
-        "reference-seeding": "face_seed_score DESC",
+        "reference-seeding": "CASE WHEN face_count BETWEEN 1 AND 4 THEN 0 ELSE 1 END,face_seed_score DESC",
         "likely": "COALESCE(latest_score,face_seed_score,0) DESC",
         "no-face": "capture_time",
         "cluster": "COALESCE(latest_score,face_seed_score,0) DESC",
@@ -524,11 +524,17 @@ def _packet_media(
                        ORDER BY cs.score_id DESC LIMIT 1) latest_score,
                       (SELECT MAX(f.quality * f.width * f.height /
                                       MAX(1.0, p.width * p.height))
-                       FROM faces f WHERE f.analysis_run_id=(
+                       FROM faces f WHERE f.photo_id=p.photo_id AND f.analysis_run_id=(
                            SELECT ar.analysis_run_id FROM analysis_results ar
                            WHERE ar.photo_id=p.photo_id AND ar.batch_id=bp.batch_id
                            ORDER BY ar.result_id DESC LIMIT 1
-                       )) face_seed_score
+                       )) face_seed_score,
+                      (SELECT COUNT(*) FROM faces f WHERE f.photo_id=p.photo_id
+                       AND f.analysis_run_id=(
+                           SELECT ar.analysis_run_id FROM analysis_results ar
+                           WHERE ar.photo_id=p.photo_id AND ar.batch_id=bp.batch_id
+                           ORDER BY ar.result_id DESC LIMIT 1
+                       )) face_count
                FROM batch_photos bp
                JOIN photos p ON p.photo_id=bp.photo_id
                JOIN source_files sf ON sf.photo_id=p.photo_id
