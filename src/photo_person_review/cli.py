@@ -259,7 +259,15 @@ def analyze(
             max=1.0,
             help="YuNet confidence cutoff; lower values favor recall for human review.",
         ),
-    ] = 0.80,
+    ] = 0.50,
+    face_max_side: Annotated[
+        int,
+        typer.Option(
+            "--face-max-side",
+            min=0,
+            help="Maximum image side in pixels for YuNet/SFace; 0 preserves the original size.",
+        ),
+    ] = 2000,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
     """Run local YuNet/SFace analysis and append numeric evidence to the catalog."""
@@ -268,15 +276,17 @@ def analyze(
     try:
         manager = ModelManager(config.models_dir)
         threshold_label = f"{face_threshold:.4f}".rstrip("0").rstrip(".")
+        max_side_label = str(face_max_side)
         version = (
             f"yunet:{PINNED_MODELS['yunet'].sha256[:12]}+"
-            f"sface:{PINNED_MODELS['sface'].sha256[:12]}+score:{threshold_label}"
+            f"sface:{PINNED_MODELS['sface'].sha256[:12]}+score:{threshold_label}+max-side:{max_side_label}"
         )
         analyzer = OpenCVAnalyzer(
             face_model=manager.path("yunet"),
             recognition_model=manager.path("sface"),
             analyzer_version=version,
             face_score_threshold=face_threshold,
+            face_max_side=face_max_side,
         )
         repository = CatalogAnalysisRepository(catalog)
         records = repository.batch_photo_records(

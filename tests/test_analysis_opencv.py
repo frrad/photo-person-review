@@ -32,7 +32,11 @@ class _Vector:
 
 
 class _Recognizer:
+    def __init__(self):
+        self.rows = []
+
     def alignCrop(self, image, row):
+        self.rows.append(row)
         return image
 
     def feature(self, aligned):
@@ -57,7 +61,61 @@ def test_opencv_analyzer_emits_boxes_landmarks_quality_and_normalized_embedding(
 
 
 def test_opencv_analyzer_defaults_to_review_oriented_recall():
-    assert OpenCVAnalyzer().face_score_threshold == 0.80
+    assert OpenCVAnalyzer().face_score_threshold == 0.50
+    assert "max-side:2000" in OpenCVAnalyzer().analyzer_version
+
+
+def test_opencv_analyzer_downscales_before_detection_and_maps_geometry_back(tmp_path: Path):
+    source = tmp_path / "large-photo.jpg"
+    Image.new("RGB", (4000, 2000), "white").save(source)
+
+    class ScaledFrame:
+        shape = (500, 1000, 3)
+
+    class ScaledDetector(_Detector):
+        def detect(self, image):
+            assert image.shape[:2] == (500, 1000)
+            return 1, [[100, 50, 200, 100, 120, 60, 260, 60, 200, 100, 140, 130, 250, 130, 0.91]]
+
+    recognizer = _Recognizer()
+    seen_sizes = []
+
+    def image_to_array(image):
+        seen_sizes.append(image.size)
+        return ScaledFrame()
+
+    analyzer = OpenCVAnalyzer(
+        detector=ScaledDetector(),
+        recognizer=recognizer,
+        image_to_array=image_to_array,
+        face_max_side=1000,
+    )
+    result = analyzer.analyze("photo-id", source, batch_id="day-1")
+
+    assert seen_sizes == [(1000, 500)]
+    face = result.faces[0]
+    assert face.bbox == (400, 200, 800, 400)
+    assert face.landmarks == ((480.0, 240.0), (1040.0, 240.0), (800.0, 400.0), (560.0, 520.0), (1000.0, 520.0))
+    assert recognizer.rows[0][0:4] == [100, 50, 200, 100]
+
+
+def test_opencv_analyzer_zero_max_side_preserves_original_size(tmp_path: Path):
+    source = tmp_path / "photo.jpg"
+    Image.new("RGB", (4000, 2000), "white").save(source)
+    seen_sizes = []
+
+    def image_to_array(image):
+        seen_sizes.append(image.size)
+        return _Frame()
+
+    analyzer = OpenCVAnalyzer(
+        detector=_Detector(),
+        recognizer=_Recognizer(),
+        image_to_array=image_to_array,
+        face_max_side=0,
+    )
+    analyzer.analyze("photo-id", source, batch_id="day-1")
+    assert seen_sizes == [(4000, 2000)]
 
 
 def test_opencv_analyzer_reports_missing_model_action(tmp_path: Path):

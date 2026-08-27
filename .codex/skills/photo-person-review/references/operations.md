@@ -42,8 +42,21 @@ analysis version and may analyze the whole batch because the CLI currently has
 no single-photo filter:
 
 ```console
-uv run ppr analyze --batch BATCH_ID --new --face-threshold 0.75
+uv run ppr analyze --batch BATCH_ID --new --face-threshold 0.35
 ```
+
+Large source photos are resized to a 2000-pixel maximum side before local face
+analysis by default. The persisted face boxes and landmarks remain in original
+photo coordinates, and no resized bytes are stored. For an exhaustive recall
+pass, disable this optimization explicitly:
+
+```console
+uv run ppr analyze --batch BATCH_ID --new --face-threshold 0.35 --face-max-side 0
+```
+
+Threshold and max-side settings are part of the analyzer version. Changing
+either setting therefore makes `--new` select the batch again while preserving
+earlier append-only observations.
 
 ## Rank and ask questions
 

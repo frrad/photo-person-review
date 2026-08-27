@@ -35,8 +35,8 @@ context photo separately when the crop alone is ambiguous.
 ppr init --workspace /private/path/to/catalog
 ppr import /private/path/to/archive --manifest /private/path/to/media.json
 ppr analyze --batch BATCH_ID --new
-# Lower the default 0.80 threshold if a review packet misses faces.
-ppr analyze --batch BATCH_ID --new --face-threshold 0.75
+# Lower the threshold or disable downscaling for an exhaustive recall pass.
+ppr analyze --batch BATCH_ID --new --face-threshold 0.35 --face-max-side 0
 ppr target create target-1
 ppr rank --target target-1 --batch BATCH_ID
 # Later audit tiny/distant detections that the primary queue defers.
@@ -48,6 +48,13 @@ ppr export --target target-1 --format json
 
 The exact command surface is under active implementation. Commands intended for
 agent use emit stable JSON on standard output and diagnostics on standard error.
+
+Face analysis defaults to a 0.50 YuNet confidence threshold and resizes large
+photos to a 2000-pixel maximum side before YuNet/SFace. Detected boxes and
+landmarks are mapped back to the original photo coordinates, while the
+recognizer embeds the resized image. `--face-max-side 0` disables resizing.
+Threshold and max-side settings are included in the analyzer version, so a
+`--new` run automatically processes photos under a changed recall policy.
 
 ## Evidence and decisions
 

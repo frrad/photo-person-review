@@ -67,8 +67,11 @@ class OpenCVAnalyzer:
         recognizer: Any | None = None,
         image_to_array: Callable[[Image.Image], Any] | None = None,
         analyzer_version: str = "yunet+sface",
-        face_score_threshold: float = 0.80,
+        face_score_threshold: float = 0.50,
+        face_max_side: int = 2000,
     ):
+        if face_max_side < 0:
+            raise ValueError("face_max_side must be non-negative")
         self.face_model = Path(face_model) if face_model else None
         self.recognition_model = Path(recognition_model) if recognition_model else None
         # Kept as a forward-compatible constructor argument; person analysis
@@ -78,8 +81,14 @@ class OpenCVAnalyzer:
         self._detector = detector
         self._recognizer = recognizer
         self._image_to_array = image_to_array
-        self.analyzer_version = analyzer_version
+        # CLI callers include this component in their complete version string
+        # so ``--new`` can distinguish resize policies.  Add it for direct API
+        # users as well, without double-appending an explicitly versioned name.
+        self.analyzer_version = (
+            analyzer_version if "max-side:" in analyzer_version else f"{analyzer_version}+max-side:{face_max_side}"
+        )
         self.face_score_threshold = face_score_threshold
+        self.face_max_side = face_max_side
 
     def validate_models(self) -> None:
         missing = [
@@ -130,6 +139,21 @@ class OpenCVAnalyzer:
         code = getattr(cv2, "COLOR_RGB2BGR", None)
         return cv2.cvtColor(array, code) if code is not None else array
 
+    def _scaled_image(self, image: Image.Image) -> tuple[Image.Image, float, float]:
+        """Return the detector image and factors mapping it to source pixels.
+
+        The detector and SFace recognizer work on the smaller image.  Geometry
+        emitted by the analyzer is converted back to the EXIF-corrected source
+        dimensions before it crosses the persistence boundary.
+        """
+        if self.face_max_side == 0 or max(image.size) <= self.face_max_side:
+            return image, 1.0, 1.0
+        source_width, source_height = image.size
+        scale = self.face_max_side / max(source_width, source_height)
+        scaled_size = (max(1, round(source_width * scale)), max(1, round(source_height * scale)))
+        scaled = image.resize(scaled_size, Image.Resampling.LANCZOS)
+        return scaled, source_width / scaled_size[0], source_height / scaled_size[1]
+
     @staticmethod
     def _detections(raw: Any) -> Any:
         if isinstance(raw, tuple) and len(raw) == 2:
@@ -149,7 +173,8 @@ class OpenCVAnalyzer:
             raise FileNotFoundError(path)
         with Image.open(path) as source:
             corrected = ImageOps.exif_transpose(source).convert("RGB")
-            image = self._to_bgr(corrected)
+            detector_image, x_factor, y_factor = self._scaled_image(corrected)
+            image = self._to_bgr(detector_image)
         height, width = image.shape[:2]
         detector.setInputSize((width, height))
         detected = self._detections(detector.detect(image))
@@ -157,16 +182,24 @@ class OpenCVAnalyzer:
         if detected is None:
             detected = []
         for index, row in enumerate(detected, 1):
-            x = max(0, round(self._row_value(row, 0)))
-            y = max(0, round(self._row_value(row, 1)))
-            box_width = max(1, round(self._row_value(row, 2)))
-            box_height = max(1, round(self._row_value(row, 3)))
-            x = min(x, max(0, width - 1))
-            y = min(y, max(0, height - 1))
-            box_width = min(box_width, width - x)
-            box_height = min(box_height, height - y)
+            detector_x = max(0, round(self._row_value(row, 0)))
+            detector_y = max(0, round(self._row_value(row, 1)))
+            detector_box_width = max(1, round(self._row_value(row, 2)))
+            detector_box_height = max(1, round(self._row_value(row, 3)))
+            detector_x = min(detector_x, max(0, width - 1))
+            detector_y = min(detector_y, max(0, height - 1))
+            detector_box_width = min(detector_box_width, width - detector_x)
+            detector_box_height = min(detector_box_height, height - detector_y)
+            x = min(max(0, round(detector_x * x_factor)), corrected.width - 1)
+            y = min(max(0, round(detector_y * y_factor)), corrected.height - 1)
+            box_width = min(max(1, round(detector_box_width * x_factor)), corrected.width - x)
+            box_height = min(max(1, round(detector_box_height * y_factor)), corrected.height - y)
             landmarks = tuple(
-                (self._row_value(row, offset), self._row_value(row, offset + 1)) for offset in (4, 6, 8, 10, 12)
+                (
+                    self._row_value(row, offset) * x_factor,
+                    self._row_value(row, offset + 1) * y_factor,
+                )
+                for offset in (4, 6, 8, 10, 12)
             )
             try:
                 aligned = recognizer.alignCrop(image, row)
