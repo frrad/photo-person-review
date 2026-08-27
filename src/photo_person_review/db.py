@@ -202,7 +202,7 @@ class Catalog:
         backend: str,
         model: str | None = None,
         batch_id: str | None = None,
-        target_id: str | None = None,
+        person_id: str | None = None,
         parameters: Mapping[str, object] | None = None,
         analysis_run_id: str | None = None,
     ) -> str:
@@ -210,12 +210,12 @@ class Catalog:
         analysis_run_id = analysis_run_id or self._id()
         with self.transaction() as db:
             db.execute(
-                """INSERT INTO analysis_runs(analysis_run_id,batch_id,target_id,backend,model,
+                """INSERT INTO analysis_runs(analysis_run_id,batch_id,person_id,backend,model,
                          started_at,status,parameters_json) VALUES (?, ?, ?, ?, ?, ?, 'running', ?)""",
                 (
                     analysis_run_id,
                     batch_id,
-                    target_id,
+                    person_id,
                     backend,
                     model,
                     utc_now(),
@@ -336,7 +336,7 @@ class Catalog:
         root_path: str,
         artifacts: Mapping[str, str | list[str]],
         *,
-        target_id: str | None = None,
+        person_id: str | None = None,
         batch_id: str | None = None,
         expires_at: str | None = None,
         metadata: Mapping[str, object] | None = None,
@@ -346,11 +346,11 @@ class Catalog:
         manifest_id = manifest_id or self._id()
         with self.transaction() as db:
             db.execute(
-                """INSERT INTO artifact_manifests(manifest_id,target_id,batch_id,created_at,expires_at,
+                """INSERT INTO artifact_manifests(manifest_id,person_id,batch_id,created_at,expires_at,
                          root_path,artifacts_json,metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     manifest_id,
-                    target_id,
+                    person_id,
                     batch_id,
                     utc_now(),
                     expires_at,
@@ -411,19 +411,178 @@ class Catalog:
             )
             return int(cursor.lastrowid or 0)
 
-    def create_target(
-        self, target_id: str, label: str | None = None, metadata: Mapping[str, object] | None = None
+    def create_person(
+        self, person_id: str, label: str | None = None, metadata: Mapping[str, object] | None = None
     ) -> str:
         with self.transaction() as db:
             db.execute(
-                """INSERT INTO targets VALUES (?, ?, ?, ?)
-                   ON CONFLICT(target_id) DO UPDATE SET
-                     label=COALESCE(excluded.label,targets.label),
+                """INSERT INTO people VALUES (?, ?, ?, ?)
+                   ON CONFLICT(person_id) DO UPDATE SET
+                     label=COALESCE(excluded.label,people.label),
                      metadata_json=CASE WHEN excluded.metadata_json='{}'
-                       THEN targets.metadata_json ELSE excluded.metadata_json END""",
-                (target_id, label, utc_now(), self._json(metadata or {})),
+                       THEN people.metadata_json ELSE excluded.metadata_json END""",
+                (person_id, label, utc_now(), self._json(metadata or {})),
             )
-        return target_id
+        return person_id
+
+    def _require_person(self, person_id: str) -> None:
+        if self.connection.execute("SELECT 1 FROM people WHERE person_id=?", (person_id,)).fetchone() is None:
+            raise ValueError(f"unknown person: {person_id}")
+
+    def add_identity_assertion(
+        self,
+        person_id: str,
+        photo_id: str,
+        *,
+        face_id: str | None = None,
+        kind: str = "positive",
+        batch_id: str | None = None,
+        captured_at: str | None = None,
+        embedding: list[float] | tuple[float, ...] | None = None,
+        metadata: Mapping[str, object] | None = None,
+        assertion_id: str | None = None,
+    ) -> str:
+        if kind not in {"positive", "negative"}:
+            raise ValueError("assertion kind must be positive or negative")
+        assertion_id = assertion_id or self._id()
+        self._require_person(person_id)
+        if face_id is not None:
+            active = self.connection.execute(
+                """SELECT a.assertion_id,a.person_id,a.assertion_kind
+                   FROM face_identity_assertions a
+                   WHERE a.face_id=? AND a.person_id=? AND a.assertion_kind=?
+                     AND (SELECT e.event FROM face_identity_assertion_events e
+                          WHERE e.assertion_id=a.assertion_id ORDER BY e.event_id DESC LIMIT 1)='active'
+                   LIMIT 1""",
+                (face_id, person_id, kind),
+            ).fetchone()
+            if active is not None:
+                return str(active["assertion_id"])
+            if kind == "positive":
+                other = self.connection.execute(
+                    """SELECT a.assertion_id,a.person_id FROM face_identity_assertions a
+                       WHERE a.face_id=? AND a.person_id<>? AND a.assertion_kind='positive'
+                         AND (SELECT e.event FROM face_identity_assertion_events e
+                              WHERE e.assertion_id=a.assertion_id ORDER BY e.event_id DESC LIMIT 1)='active'
+                       LIMIT 1""",
+                    (face_id, person_id),
+                ).fetchone()
+                if other is not None:
+                    raise ValueError(
+                        f"identity conflict: face {face_id} is actively assigned to person {other['person_id']}"
+                    )
+        with self.transaction() as db:
+            db.execute(
+                """INSERT INTO face_identity_assertions
+                (assertion_id,person_id,photo_id,face_id,assertion_kind,batch_id,captured_at,
+                 embedding_json,created_at,metadata_json) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    assertion_id,
+                    person_id,
+                    photo_id,
+                    face_id,
+                    kind,
+                    batch_id,
+                    captured_at,
+                    self._json(embedding) if embedding is not None else None,
+                    utc_now(),
+                    self._json(metadata or {}),
+                ),
+            )
+            db.execute(
+                """INSERT INTO face_identity_assertion_events(
+                   assertion_id,event,created_at,metadata_json)
+                   VALUES (?, 'active', ?, '{}')""",
+                (assertion_id, utc_now()),
+            )
+        return assertion_id
+
+    def record_decision(
+        self,
+        person_id: str,
+        photo_id: str,
+        decision: str,
+        *,
+        actor: str = "user",
+        evidence: Mapping[str, object] | None = None,
+        analysis_run_id: str | None = None,
+    ) -> int:
+        """Record a person-specific append-only decision."""
+        if decision not in {"accept", "reject", "unsure"}:
+            raise ValueError("decision must be accept, reject, or unsure")
+        with self.transaction() as db:
+            cursor = db.execute(
+                """INSERT INTO decisions(person_id,photo_id,decision,actor,evidence_json,
+                         analysis_run_id,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (person_id, photo_id, decision, actor, self._json(evidence or {}), analysis_run_id, utc_now()),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def retire_identity_assertion(self, assertion_id: str) -> None:
+        with self.transaction() as db:
+            db.execute(
+                """INSERT INTO face_identity_assertion_events(
+                   assertion_id,event,created_at,metadata_json)
+                   VALUES (?, 'retired', ?, '{}')""",
+                (assertion_id, utc_now()),
+            )
+
+    def list_identity_assertions(
+        self, person_id: str, *, assertion_kind: str | None = None, active_only: bool = True
+    ) -> list[sqlite3.Row]:
+        query = "SELECT a.* FROM face_identity_assertions a WHERE a.person_id=?"
+        args: list[object] = [person_id]
+        if assertion_kind is not None:
+            query += " AND a.assertion_kind=?"
+            args.append(assertion_kind)
+        if active_only:
+            query += """ AND (SELECT e.event FROM face_identity_assertion_events e
+                WHERE e.assertion_id=a.assertion_id ORDER BY e.event_id DESC LIMIT 1)='active'"""
+        query += " ORDER BY a.created_at,a.assertion_id"
+        return list(self.connection.execute(query, args))
+
+    def list_people(self) -> list[sqlite3.Row]:
+        return list(self.connection.execute("SELECT * FROM people ORDER BY created_at, person_id"))
+
+    def identity_conflicts(self, person_id: str | None = None) -> list[sqlite3.Row]:
+        """Return conflicts that still involve currently active assertions."""
+        rows = self.connection.execute("SELECT * FROM identity_conflicts ORDER BY conflict_id").fetchall()
+        result: list[sqlite3.Row] = []
+        for row in rows:
+            try:
+                assertion_ids = json.loads(row["assertion_ids_json"])
+            except (TypeError, json.JSONDecodeError):
+                assertion_ids = []
+            if not assertion_ids:
+                continue
+            placeholders = ",".join("?" for _ in assertion_ids)
+            active = self.connection.execute(
+                f"""SELECT assertion_id,person_id,assertion_kind,face_id
+                    FROM face_identity_assertions
+                    WHERE assertion_id IN ({placeholders})
+                      AND (SELECT e.event FROM face_identity_assertion_events e
+                           WHERE e.assertion_id=face_identity_assertions.assertion_id
+                           ORDER BY e.event_id DESC LIMIT 1)='active'""",
+                assertion_ids,
+            ).fetchall()
+            kinds = {(item["person_id"], item["assertion_kind"]) for item in active}
+            conflict_kind = row["conflict_kind"]
+            if person_id is not None and not any(item["person_id"] == person_id for item in active):
+                continue
+            relevant = (
+                len({person for person, kind in kinds if kind == "positive"}) > 1
+                if conflict_kind == "multiple_positive_identities"
+                else (
+                    any(kind == "positive" for _, kind in kinds) and any(kind == "negative" for _, kind in kinds)
+                    if conflict_kind == "positive_and_negative_same_person"
+                    else len(active) > 1
+                    if conflict_kind == "duplicate_exact_identity_evidence"
+                    else bool(active)
+                )
+            )
+            if relevant:
+                result.append(row)
+        return result
 
     def create_tag(self, name: str, description: str | None = None, tag_id: str | None = None) -> str:
         tag_id = tag_id or self._id()
@@ -442,13 +601,13 @@ class Catalog:
         provenance: str,
         value: str = "true",
         confidence: float | None = None,
-        target_id: str | None = None,
+        person_id: str | None = None,
         analysis_run_id: str | None = None,
         evidence: Mapping[str, object] | None = None,
     ) -> int:
         with self.transaction() as db:
             cursor = db.execute(
-                """INSERT INTO tag_assignments(photo_id,tag_id,value,provenance,confidence,target_id,
+                """INSERT INTO tag_assignments(photo_id,tag_id,value,provenance,confidence,person_id,
                          analysis_run_id,created_at,metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     photo_id,
@@ -456,38 +615,10 @@ class Catalog:
                     value,
                     provenance,
                     confidence,
-                    target_id,
+                    person_id,
                     analysis_run_id,
                     utc_now(),
                     self._json(evidence or {}),
-                ),
-            )
-            return int(cursor.lastrowid or 0)
-
-    def record_decision(
-        self,
-        target_id: str,
-        photo_id: str,
-        decision: str,
-        *,
-        actor: str = "user",
-        evidence: Mapping[str, object] | None = None,
-        analysis_run_id: str | None = None,
-    ) -> int:
-        if decision not in {"accept", "reject", "unsure"}:
-            raise ValueError("decision must be accept, reject, or unsure")
-        with self.transaction() as db:
-            cursor = db.execute(
-                """INSERT INTO decisions(target_id,photo_id,decision,actor,evidence_json,
-                         analysis_run_id,created_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    target_id,
-                    photo_id,
-                    decision,
-                    actor,
-                    self._json(evidence or {}),
-                    analysis_run_id,
-                    utc_now(),
                 ),
             )
             return int(cursor.lastrowid or 0)
@@ -501,9 +632,9 @@ class Catalog:
             "batch_photo_observations",
             "photo_metadata",
             "tag_assignments",
-            "targets",
-            "target_references",
-            "target_reference_events",
+            "people",
+            "face_identity_assertions",
+            "face_identity_assertion_events",
             "appearance_references",
             "analysis_runs",
             "analysis_results",
@@ -514,14 +645,17 @@ class Catalog:
             "decisions",
             "artifact_manifests",
         )
-        return {table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables}
+        result = {
+            table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]) for table in tables
+        }
+        return result
 
-    def latest_decisions(self, target_id: str) -> list[sqlite3.Row]:
+    def latest_decisions(self, person_id: str) -> list[sqlite3.Row]:
         return list(
             self.connection.execute(
                 """SELECT d.* FROM decisions d
-            WHERE d.target_id=? AND d.decision_id=(SELECT MAX(d2.decision_id) FROM decisions d2
-            WHERE d2.target_id=d.target_id AND d2.photo_id=d.photo_id) ORDER BY d.photo_id""",
-                (target_id,),
+            WHERE d.person_id=? AND d.decision_id=(SELECT MAX(d2.decision_id) FROM decisions d2
+            WHERE d2.person_id=d.person_id AND d2.photo_id=d.photo_id) ORDER BY d.photo_id""",
+                (person_id,),
             )
         )

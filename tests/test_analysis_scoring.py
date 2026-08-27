@@ -4,7 +4,7 @@ from photo_person_review.analysis import (
     FaceObservation,
     VisionEvidenceRequest,
     rank_candidates,
-    rank_for_target,
+    rank_for_person,
     score_candidate,
 )
 from photo_person_review.review import ReviewMedia, select_packet_media
@@ -37,7 +37,7 @@ def test_face_and_appearance_are_explainable_and_appearance_is_batch_scoped():
     assert score.components.face == 1.0
     assert score.components.appearance == 1.0
     assert score.supporting_reference_id == "ref-1"
-    assert score.supporting_person_id == "p2"
+    assert score.supporting_appearance_subject_id == "p2"
     assert "face" in score.reasons
 
 
@@ -86,12 +86,18 @@ def test_rank_is_deterministic_for_ties():
     assert [x.media_id for x in rank_candidates([low, high])] == ["a", "b"]
 
 
-def test_target_ranking_uses_long_lived_faces_but_current_batch_appearance():
+def test_person_ranking_uses_long_lived_faces_but_current_batch_appearance():
     class FakeStore:
-        def list_references(self, target_id, *, kind=None):
-            return [{"reference_id": "old", "embedding": (1.0, 0.0)}] if kind == "positive" else []
+        def identity_conflicts(self, person_id=None):
+            return []
 
-        def list_appearance_references(self, target_id, *, batch_id):
+        def list_people(self):
+            return [{"person_id": "t"}]
+
+        def list_identity_assertions(self, person_id, *, assertion_kind=None):
+            return [{"assertion_id": "old", "embedding": (1.0, 0.0)}] if assertion_kind == "positive" else []
+
+        def list_appearance_references(self, person_id, *, batch_id):
             return [{"feature": (1.0, 0.0)}] if batch_id == "b2" else []
 
     store = FakeStore()
@@ -108,7 +114,7 @@ def test_target_ranking_uses_long_lived_faces_but_current_batch_appearance():
             appearances=(AppearanceObservation("old-batch", "p", "b1", (1, 0)),),
         ),
     ]
-    ranked = rank_for_target("t", results, store)
+    ranked = rank_for_person("t", results, store)
     assert ranked[0].media_id == "m"
     assert ranked[0].components.appearance == 1.0
 

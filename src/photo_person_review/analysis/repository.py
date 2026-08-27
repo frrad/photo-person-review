@@ -123,7 +123,7 @@ class CatalogAnalysisRepository:
             self.catalog.add_person_box(
                 result.media_id,
                 run_id,
-                person_box_id=f"{run_id}:{person.person_id}",
+                person_box_id=f"{run_id}:{person.person_box_id}",
                 x=person.bbox[0],
                 y=person.bbox[1],
                 width=person.bbox[2],
@@ -132,7 +132,7 @@ class CatalogAnalysisRepository:
                 confidence=person.confidence,
                 metadata={
                     "detector_version": person.detector_version,
-                    "analyzer_person_id": person.person_id,
+                    "analyzer_person_id": person.person_box_id,
                 },
             )
         for appearance in result.appearances:
@@ -141,11 +141,11 @@ class CatalogAnalysisRepository:
                 run_id,
                 "appearance",
                 appearance.feature,
-                subject_id=appearance.person_id,
+                subject_id=appearance.appearance_subject_id,
                 metadata={
                     "extractor_version": appearance.extractor_version,
                     "batch_id": appearance.batch_id,
-                    "analyzer_person_id": appearance.person_id,
+                    "analyzer_person_id": appearance.appearance_subject_id,
                 },
             )
 

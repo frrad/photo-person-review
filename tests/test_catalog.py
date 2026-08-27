@@ -6,7 +6,7 @@ from photo_person_review.review import ReviewStore
 
 def test_catalog_is_metadata_only_and_migrates(tmp_path):
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
-        assert catalog.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 1
+        assert catalog.connection.execute("SELECT version FROM schema_version").fetchone()[0] == 2
         columns = {row[1] for row in catalog.connection.execute("PRAGMA table_info(photos)")}
         assert not columns.intersection({"image", "image_bytes", "blob", "photo_bytes"})
         tables = catalog.connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
@@ -44,7 +44,7 @@ def test_same_photo_is_upserted_but_source_observations_accumulate(tmp_path):
 def test_decisions_and_tag_assignments_are_append_only(tmp_path):
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
         photo_id = catalog.upsert_photo("b" * 64)
-        catalog.create_target("person-1")
+        catalog.create_person("person-1")
         tag_id = catalog.create_tag("contains-person")
         catalog.assign_tag(photo_id, tag_id, provenance="local-model", confidence=0.8)
         catalog.record_decision("person-1", photo_id, "accept")
@@ -59,18 +59,18 @@ def test_invalid_sha_and_decision_are_rejected(tmp_path):
         stable_photo_id("nope")
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
         photo_id = catalog.upsert_photo("c" * 64)
-        catalog.create_target("person-1")
+        catalog.create_person("person-1")
         with pytest.raises(ValueError):
             catalog.record_decision("person-1", photo_id, "maybe")
 
 
 def test_target_creation_is_idempotent_and_can_add_a_label(tmp_path):
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
-        assert catalog.create_target("person-1") == "person-1"
-        assert catalog.create_target("person-1", "Person") == "person-1"
-        row = catalog.connection.execute("SELECT label FROM targets WHERE target_id='person-1'").fetchone()
+        assert catalog.create_person("person-1") == "person-1"
+        assert catalog.create_person("person-1", "Person") == "person-1"
+        row = catalog.connection.execute("SELECT label FROM people WHERE person_id='person-1'").fetchone()
         assert row["label"] == "Person"
-        assert catalog.counts()["targets"] == 1
+        assert catalog.counts()["people"] == 1
 
 
 def test_review_store_uses_core_targets_decisions_and_reference_events(tmp_path):
@@ -78,9 +78,11 @@ def test_review_store_uses_core_targets_decisions_and_reference_events(tmp_path)
         photo_id = catalog.upsert_photo("d" * 64)
         batch_id = catalog.create_batch()
         with ReviewStore(catalog.connection) as review:
-            review.create_target("person-1")
-            reference_id = review.add_reference("person-1", media_id=photo_id, batch_id=batch_id, embedding=(1, 0))
-            review.retire_reference(reference_id)
+            review.create_person("person-1")
+            reference_id = review.add_identity_assertion(
+                "person-1", media_id=photo_id, batch_id=batch_id, embedding=(1, 0)
+            )
+            review.retire_identity_assertion(reference_id)
             review.add_decision("person-1", photo_id, "accept", batch_id=batch_id)
         assert (
             catalog.connection.execute(
@@ -88,11 +90,11 @@ def test_review_store_uses_core_targets_decisions_and_reference_events(tmp_path)
             ).fetchone()[0]
             == 0
         )
-        assert catalog.connection.execute("SELECT COUNT(*) FROM targets").fetchone()[0] == 1
+        assert catalog.connection.execute("SELECT COUNT(*) FROM people").fetchone()[0] == 1
         assert catalog.connection.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 1
         assert (
             catalog.connection.execute(
-                "SELECT event FROM target_reference_events ORDER BY event_id DESC LIMIT 1"
+                "SELECT event FROM face_identity_assertion_events ORDER BY event_id DESC LIMIT 1"
             ).fetchone()[0]
             == "retired"
         )

@@ -8,8 +8,7 @@ extracting IDs with `jq`.
 ```console
 uv run ppr status
 uv run ppr batches
-uv run ppr target list
-uv run ppr target references TARGET_ID
+uv run ppr person list
 uv run ppr models status
 ```
 
@@ -60,15 +59,15 @@ earlier append-only observations.
 
 ## Rank and ask questions
 
-Select the active target from the conversation. If it is not established and
-`target list` returns more than one person, ask the user which person to review.
+Select the person from the conversation. If it is not established and
+`person list` returns more than one person, ask the user which person to review.
 Refresh ranking immediately before every `likely` packet so selection never
 depends on absent or stale candidate scores:
 
 ```console
-uv run ppr rank --target TARGET_ID --batch BATCH_ID
+uv run ppr rank --person PERSON_ID --batch BATCH_ID
 review_dir=$(mktemp -d /private/tmp/ppr-review.XXXXXX)
-uv run ppr review packet --target TARGET_ID --batch BATCH_ID \
+uv run ppr review packet --person PERSON_ID --batch BATCH_ID \
   --strategy likely --limit 8 --output "$review_dir"
 ```
 
@@ -85,20 +84,33 @@ do not carry labels or face IDs forward from an older temporary packet.
 
 ## Record identity evidence
 
-Make target creation repeat-safe and keep the human-readable name as the label:
+Make person creation repeat-safe and keep the human-readable name as the label:
 
 ```console
-uv run ppr target create TARGET_ID --label PERSON_NAME
-uv run ppr target reference-add TARGET_ID PHOTO_ID --face FACE_ID \
-  --kind positive --batch BATCH_ID
+uv run ppr person create PERSON_ID --label PERSON_NAME
+uv run ppr identity assign --person PERSON_ID --face FACE_ID
+uv run ppr identity assertions --person PERSON_ID
 ```
 
-For an explicitly identified different person relative to the active target:
+For an explicitly identified different person, record that face as their own
+positive assertion; use `exclude` only for a deliberate hard negative:
 
 ```console
-uv run ppr target reference-add ACTIVE_TARGET PHOTO_ID --face FACE_ID \
-  --kind negative --batch BATCH_ID
+uv run ppr identity exclude --person PERSON_ID --face FACE_ID
 ```
+
+If a migration or review creates an ambiguity, inspect the concrete assertions
+before ranking. Resolve it by retiring the incorrect assertion; retirement is
+append-only and preserves the event history:
+
+```console
+uv run ppr identity conflicts
+uv run ppr identity retire ASSERTION_ID
+uv run ppr identity assertions --person PERSON_ID --history
+```
+
+Ranking stops when the selected person has an unresolved identity conflict, so
+the conflict must be reconciled before generating scores.
 
 Use the full `face_id` from the packet generated against the live catalog. Face
 IDs contain an analysis-run prefix; stale packet IDs may not exist in another
@@ -106,22 +118,34 @@ catalog or after switching workspaces.
 
 ## Record whole-photo decisions
 
-Only after the user answers whether the target is present in the photo:
+Only after the user answers whether the person is present in the photo:
 
 ```console
-uv run ppr decide TARGET_ID accept PHOTO_ID [PHOTO_ID ...] --actor user
-uv run ppr decide TARGET_ID reject PHOTO_ID [PHOTO_ID ...] --actor user
-uv run ppr decide TARGET_ID unsure PHOTO_ID [PHOTO_ID ...] --actor user
+uv run ppr decide --person PERSON_ID accept PHOTO_ID [PHOTO_ID ...] --actor user
+uv run ppr decide --person PERSON_ID reject PHOTO_ID [PHOTO_ID ...] --actor user
+uv run ppr decide --person PERSON_ID unsure PHOTO_ID [PHOTO_ID ...] --actor user
 ```
 
-## Reconcile the durable Chloe export
+When the user explains how or where they recognized the person, preserve their
+exact words on the decision instead of reducing them to inferred labels:
+
+```console
+uv run ppr decide --person PERSON_ID accept PHOTO_ID --actor user \
+  --note "That's Chloe turned away on the right side, wearing her jacket."
+```
+
+The note is stored verbatim under `decisions.evidence_json.note`. It is durable
+photo-level evidence only; do not turn it into an identity assertion or
+appearance reference without a separate explicit review step.
+
+## Reconcile a durable person export
 
 Review packets and their annotated media are ephemeral batch-review artifacts.
 The going-forward handoff to a local photo workflow is a durable hard-link
 directory, reconciled after imports and the latest decisions:
 
 ```console
-uv run ppr export --target TARGET_ID \
+uv run ppr export --person PERSON_ID \
   --output "$HOME/Pictures/chloevidigami" \
   --filename-prefix ppr_chloevidigami
 ```
@@ -129,15 +153,15 @@ uv run ppr export --target TARGET_ID \
 The destination is created if absent. Managed links are named with the
 sanitized filename prefix, capture timestamp, full stable `photo_id`, and
 current source extension
-(`ppr_chloevidigami_2026-08-26_092328_<photo_id>.jpg`). The current set is the union of active positive face-reference photos and latest `accept`
+(`ppr_chloevidigami_2026-08-26_092328_<photo_id>.jpg`). The current set is the union of active positive identity-assertion photos and latest `accept`
 decisions, except that a latest `reject` excludes the photo even when it has
 older acceptance evidence. Re-running follows the newest present/replaced
 source observation, adds new links, updates changed links, and removes stale
 managed links.
 
 `--filename-prefix` is optional. Its value is lowercased and reduced to
-`[a-z0-9]+` components joined by underscores. Without it, the target label is
-used, falling back to the target ID or `photo`. Missing or invalid
+`[a-z0-9]+` components joined by underscores. Without it, the person label is
+used, falling back to the person ID or `photo`. Missing or invalid
 `capture_time` values use `undated`. The manifest stores the effective prefix;
 changing it safely migrates prior managed names on the next sync while
 preserving unknown links.

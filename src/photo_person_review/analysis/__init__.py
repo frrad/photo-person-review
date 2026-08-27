@@ -11,7 +11,7 @@ from .models import (
     VisionEvidenceResult,
 )
 from .pipeline import LocalAnalyzer, MissingModelError, OpenCVAnalyzer, analyze_media
-from .ranking import CandidateEvidence, rank_for_target
+from .ranking import CandidateEvidence, rank_for_person
 from .repository import CatalogAnalysisRepository
 from .scoring import (
     CandidateScore,
@@ -42,7 +42,7 @@ __all__ = [
     "PINNED_MODELS",
     "CatalogAnalysisRepository",
     "CandidateEvidence",
-    "rank_for_target",
+    "rank_for_person",
     "CandidateScore",
     "EvidenceComponents",
     "ScoreWeights",

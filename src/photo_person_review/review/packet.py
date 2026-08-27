@@ -285,7 +285,7 @@ def build_review_packet(
             _save_private(person_crop, person_path)
             person_entries.append(
                 {
-                    "person_id": person.person_id,
+                    "person_box_id": person.person_box_id,
                     "path": str(person_path.relative_to(out)),
                     "bbox": list(person.bbox),
                 }

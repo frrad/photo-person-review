@@ -58,7 +58,7 @@ class CandidateScore:
     components: EvidenceComponents
     supporting_face_id: str | None = None
     supporting_reference_id: str | None = None
-    supporting_person_id: str | None = None
+    supporting_appearance_subject_id: str | None = None
     reasons: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -70,7 +70,7 @@ class CandidateScore:
             "components": self.components.as_dict(),
             "supporting_face_id": self.supporting_face_id,
             "supporting_reference_id": self.supporting_reference_id,
-            "supporting_person_id": self.supporting_person_id,
+            "supporting_appearance_subject_id": self.supporting_appearance_subject_id,
             "reasons": list(self.reasons),
             "metadata": dict(self.metadata),
         }
@@ -133,7 +133,7 @@ def appearance_evidence(
         for ref in refs:
             value = _positive_similarity(cosine_similarity(item.feature, ref))
             if value > best[0]:
-                best = (value, item.person_id)
+                best = (value, item.appearance_subject_id)
     return best
 
 
@@ -173,7 +173,7 @@ def score_candidate(
         components=components,
         supporting_face_id=face_id,
         supporting_reference_id=ref_id,
-        supporting_person_id=person_id,
+        supporting_appearance_subject_id=person_id,
         reasons=reasons,
         metadata=metadata or {},
     )

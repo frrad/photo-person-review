@@ -1,8 +1,8 @@
 # Photo Person Review
 
 Photo Person Review is a local-first, CLI-only catalog and review tool for
-finding photos that contain a configured person. It is intended for recurring
-daily or event batches: approved face references carry forward, while outfit,
+finding photos that contain a selected person. It is intended for recurring
+daily or event batches: approved identity assertions carry forward, while outfit,
 burst, and context evidence remains scoped to the batch where it was observed.
 
 The reviewer interface can be an agent such as Codex. The CLI produces
@@ -25,6 +25,18 @@ photos remain in their original archive and are opened read-only. Annotated
 images, contact sheets, and crops are regenerated into caller-selected temporary
 directories when review is needed.
 
+People are persistent identities, while each rank/review/export operation
+selects one person. A detected face is an observation, not a named identity.
+Confirmed names are stored as `face_identity_assertions`; explicit unknown
+lookalikes can be stored as hard-negative assertions. One photo can therefore
+rank positively for several people independently, without duplicating the
+photo record. No temporal weighting is applied to references.
+
+Identity assertions are reviewable and reversible as events. Use
+`ppr identity conflicts` to inspect migration ambiguities, then retire an
+incorrect assertion with `ppr identity retire ASSERTION_ID`; ranking pauses for
+the affected person until the ambiguity is resolved.
+
 For conversational review, present one full-size face crop per question. Use
 the contact and face sheets only as packet indexes, and show the annotated
 context photo separately when the crop alone is ambiguous.
@@ -37,15 +49,16 @@ ppr import /private/path/to/archive --manifest /private/path/to/media.json
 ppr analyze --batch BATCH_ID --new
 # Lower the threshold or disable downscaling for an exhaustive recall pass.
 ppr analyze --batch BATCH_ID --new --face-threshold 0.35 --face-max-side 0
-ppr target create target-1
-ppr rank --target target-1 --batch BATCH_ID
+ppr person create chloe --label Chloe
+ppr rank --person chloe --batch BATCH_ID
 # Later audit tiny/distant detections that the primary queue defers.
-ppr rank --target target-1 --batch BATCH_ID --min-face-area-ratio 0
-ppr review packet --target target-1 --strategy reference-seeding --output "$TMPDIR"
-ppr decide --target target-1 --accept PHOTO_ID --actor user
-ppr export --target target-1 --format json
+ppr rank --person chloe --batch BATCH_ID --min-face-area-ratio 0
+ppr review packet --person chloe --strategy reference-seeding --output "$TMPDIR"
+ppr decide --person chloe accept PHOTO_ID --actor user \
+  --note "That's Chloe turned away in the bottom-left corner, wearing her jacket."
+ppr export --person chloe --format json
 # Reconcile the durable, going-forward hard-link photo export (the default).
-ppr export --target target-1 --output "$HOME/Pictures/chloevidigami" \
+ppr export --person chloe --output "$HOME/Pictures/chloevidigami" \
   --filename-prefix ppr_chloevidigami
 ```
 
@@ -64,17 +77,17 @@ sanitized prefix, capture timestamp, full stable photo ID, and current source
 extension, for example
 `ppr_chloevidigami_2026-08-26_092328_0123...cdef.jpg`, along with a small hidden
 ownership manifest. Re-running the command reconciles
-these managed links with the current target positives: new links are added,
+these managed links with the current person's positives: new links are added,
 changed source paths are updated, and stale managed links are removed safely.
 
 Pass `--filename-prefix` to namespace the export for exact filename searches;
 the value is lowercased and reduced to `[a-z0-9]+` components joined by
-underscores. If omitted, the target label is used, falling back to the target
+underscores. If omitted, the person's label is used, falling back to the person
 ID or `photo`. Invalid or missing capture times use `undated`. The manifest
 records the effective prefix, and changing it migrates the prior managed names
 on the next sync while preserving unknown links.
 
-The current positive set is the union of active positive face references and
+The current positive set is the union of active positive identity assertions and
 the latest `accept` decisions. A photo whose latest decision is `reject` is
 excluded even if it has older acceptance evidence. Source photos remain in
 place; the export never copies or opens photo bytes. Missing source paths,
@@ -98,7 +111,10 @@ Threshold and max-side settings are included in the analyzer version, so a
 
 ## Evidence and decisions
 
-- User-approved face references and hard negatives persist across batches.
+- User-approved identity assertions and explicit hard negatives persist across batches.
+- Photo decisions may preserve the user's exact free-form context in `evidence_json`,
+  including how they recognized someone whose face was missed, obscured, or turned away.
+  These notes remain photo-level evidence and never silently become face or appearance training data.
 - Outfit and person-crop evidence is batch-local by default.
 - Local face, appearance, time, burst, and context signals rank candidates.
 - Imported provider tags and future VLM results are non-authoritative evidence.

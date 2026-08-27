@@ -30,7 +30,7 @@ class FaceObservation:
 @dataclass(frozen=True)
 class PersonObservation:
     media_id: str
-    person_id: str
+    person_box_id: str
     bbox: tuple[int, int, int, int]
     face_id: str | None = None
     confidence: float = 1.0
@@ -43,7 +43,7 @@ class PersonObservation:
 @dataclass(frozen=True)
 class AppearanceObservation:
     media_id: str
-    person_id: str
+    appearance_subject_id: str
     batch_id: str
     feature: tuple[float, ...]
     extractor_version: str = "unknown"
@@ -86,7 +86,7 @@ class VisionEvidenceRequest:
     """
 
     request_id: str
-    target_id: str
+    person_id: str
     image_ids: tuple[str, ...]
     evidence_types: tuple[str, ...] = ("correspondence",)
     prompt_version: str = "1"

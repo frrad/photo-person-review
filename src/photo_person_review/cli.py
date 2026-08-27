@@ -5,31 +5,37 @@ from __future__ import annotations
 import json
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, cast
 
 import typer
 
 from .analysis import (
     PINNED_MODELS,
+    AnalysisResult,
     CatalogAnalysisRepository,
     FaceObservation,
     ModelManager,
     OpenCVAnalyzer,
-    rank_candidates,
-    score_candidate,
+    rank_for_person,
 )
 from .config import CatalogConfig
 from .db import Catalog
-from .exporters import catalog_rows, write_csv, write_hardlinks, write_json, write_symlinks
+from .exporters import (
+    catalog_rows,
+    write_csv,
+    write_json,
+    write_person_hardlinks,
+    write_person_symlinks,
+)
 from .importers import CatalogImportRepository, FolderImporter, VidigamiAdapter
 from .review import ReviewMedia, ReviewStore, build_review_packet
 
 app = typer.Typer(help="Local-first photo catalog and person-review state.", no_args_is_help=True)
-target_app = typer.Typer(help="Manage persistent person targets.")
+person_app = typer.Typer(help="Manage persistent people and named identity assertions.")
 tag_app = typer.Typer(help="Manage metadata tag definitions.")
 review_app = typer.Typer(help="Build disposable visual packets for conversational review.")
 models_app = typer.Typer(help="Install and inspect pinned local analysis models.")
-app.add_typer(target_app, name="target")
+app.add_typer(person_app, name="person")
 app.add_typer(tag_app, name="tag")
 app.add_typer(review_app, name="review")
 app.add_typer(models_app, name="models")
@@ -48,6 +54,41 @@ def _emit(payload: object) -> None:
 def _catalog(workspace: Path | None) -> tuple[CatalogConfig, Catalog]:
     config = _config(workspace)
     return config, Catalog(config.database_path)
+
+
+def _schema_version(catalog: Catalog) -> int:
+    row = catalog.connection.execute("SELECT version FROM schema_version").fetchone()
+    return int(row[0]) if row is not None else 0
+
+
+def _require_person(catalog: Catalog, person_id: str) -> None:
+    if catalog.connection.execute("SELECT 1 FROM people WHERE person_id=?", (person_id,)).fetchone() is None:
+        raise typer.BadParameter(f"unknown person: {person_id}; create it with `ppr person create {person_id}`")
+
+
+def _raise_for_person_conflicts(catalog: Catalog, person_id: str) -> None:
+    """Prevent explainability-breaking ranking while identity evidence is ambiguous."""
+
+    with ReviewStore(catalog.connection) as review:
+        conflicts = review.identity_conflicts()
+    for conflict in conflicts:
+        try:
+            assertion_ids = json.loads(conflict.get("assertion_ids_json", "[]"))
+        except (TypeError, json.JSONDecodeError):
+            assertion_ids = []
+        if not isinstance(assertion_ids, list) or not assertion_ids:
+            continue
+        placeholders = ",".join("?" for _ in assertion_ids)
+        people = catalog.connection.execute(
+            f"SELECT DISTINCT person_id FROM face_identity_assertions WHERE assertion_id IN ({placeholders})",
+            assertion_ids,
+        ).fetchall()
+        if any(str(row["person_id"]) == person_id for row in people):
+            ids = ", ".join(str(value) for value in assertion_ids)
+            raise typer.BadParameter(
+                f"unresolved identity conflict for person {person_id} ({conflict.get('conflict_kind')}): "
+                f"assertions {ids}; reconcile or retire an assertion with `ppr identity retire ASSERTION_ID`"
+            )
 
 
 def _reviewable_faces(
@@ -82,7 +123,7 @@ def init(workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = 
             {
                 "workspace": str(config.workspace),
                 "database": str(config.database_path),
-                "schema_version": 1,
+                "schema_version": _schema_version(catalog),
                 "counts": catalog.counts(),
             }
         )
@@ -105,97 +146,167 @@ def status(workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] 
         )
 
 
-@target_app.command("create")
-def target_create(
-    target_id: str,
+@person_app.command("create")
+def person_create(
+    person_id: str,
     label: Annotated[str | None, typer.Option("--label")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
-    """Create a reusable person target."""
-    config = _config(workspace)
-    with Catalog(config.database_path) as catalog:
-        _emit({"target_id": catalog.create_target(target_id, label), "label": label})
-
-
-@target_app.command("list")
-def target_list(
-    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
-) -> None:
-    """List targets as JSON."""
-    config = _config(workspace)
-    with Catalog(config.database_path) as catalog:
-        rows = catalog.connection.execute(
-            "SELECT target_id,label,created_at FROM targets ORDER BY created_at"
-        ).fetchall()
-        _emit([dict(row) for row in rows])
-
-
-@target_app.command("reference-add")
-def target_reference_add(
-    target_id: str,
-    photo_id: str,
-    face_id: Annotated[str, typer.Option("--face")],
-    kind: Annotated[str, typer.Option("--kind")] = "positive",
-    batch_id: Annotated[str | None, typer.Option("--batch")] = None,
-    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
-) -> None:
-    """Promote one analyzed face to a persistent positive or hard-negative reference."""
+    """Create or update a persistent named person."""
 
     _, catalog = _catalog(workspace)
     try:
-        row = catalog.connection.execute(
-            """SELECT vector_json FROM numeric_features
-               WHERE photo_id=? AND subject_id=? AND feature_kind='face_embedding'
-               ORDER BY feature_id DESC LIMIT 1""",
-            (photo_id, face_id),
-        ).fetchone()
-        if row is None:
-            raise typer.BadParameter("the requested analyzed face embedding does not exist")
-        embedding = tuple(float(value) for value in json.loads(row["vector_json"]))
-        photo_row = catalog.connection.execute(
-            "SELECT capture_time FROM photos WHERE photo_id=?", (photo_id,)
-        ).fetchone()
         with ReviewStore(catalog.connection) as review:
-            reference_id = review.add_reference(
-                target_id,
+            created = review.create_person(person_id, label=label)
+        _emit({"person_id": created, "label": label})
+    finally:
+        catalog.close()
+
+
+@person_app.command("list")
+def person_list(
+    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
+) -> None:
+    """List persistent named people."""
+
+    _, catalog = _catalog(workspace)
+    try:
+        with ReviewStore(catalog.connection) as review:
+            _emit([dict(row) for row in review.list_people()])
+    finally:
+        catalog.close()
+
+
+identity_app = typer.Typer(help="Record named face identity and explicit hard-negative evidence.")
+app.add_typer(identity_app, name="identity")
+
+
+def _face_evidence(catalog: Catalog, face_id: str) -> tuple[str, tuple[float, ...]]:
+    face = catalog.connection.execute("SELECT photo_id FROM faces WHERE face_id=?", (face_id,)).fetchone()
+    if face is None:
+        raise typer.BadParameter("the requested face observation does not exist")
+    row = catalog.connection.execute(
+        """SELECT vector_json FROM numeric_features
+           WHERE subject_id=? AND feature_kind='face_embedding'
+           ORDER BY feature_id DESC LIMIT 1""",
+        (face_id,),
+    ).fetchone()
+    if row is None:
+        raise typer.BadParameter("the requested face has no persisted embedding")
+    return str(face["photo_id"]), tuple(float(value) for value in json.loads(row["vector_json"]))
+
+
+def _assign_identity(person_id: str, face_id: str, kind: str, workspace: Path | None) -> None:
+    _, catalog = _catalog(workspace)
+    try:
+        _require_person(catalog, person_id)
+        photo_id, embedding = _face_evidence(catalog, face_id)
+        with ReviewStore(catalog.connection) as review:
+            assertion_id = review.add_identity_assertion(
+                person_id,
                 media_id=photo_id,
                 face_id=face_id,
-                batch_id=batch_id,
                 embedding=embedding,
-                kind=kind,
-                captured_at=str(photo_row["capture_time"])
-                if photo_row is not None and photo_row["capture_time"]
-                else None,
+                assertion_kind=kind,
             )
         _emit(
             {
-                "reference_id": reference_id,
-                "target_id": target_id,
+                "assertion_id": assertion_id,
+                "person_id": person_id,
                 "photo_id": photo_id,
                 "face_id": face_id,
-                "kind": kind,
+                "assertion_kind": kind,
             }
         )
     finally:
         catalog.close()
 
 
-@target_app.command("references")
-def target_references(
-    target_id: str,
-    kind: Annotated[str | None, typer.Option("--kind")] = None,
+@identity_app.command("assign")
+def identity_assign(
+    person_id: Annotated[str, typer.Option("--person")],
+    face_id: Annotated[str, typer.Option("--face")],
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
-    """List active persistent face references without exposing embeddings."""
+    """Confirm that a detected face belongs to a named person."""
+    _assign_identity(person_id, face_id, "positive", workspace)
+
+
+@identity_app.command("exclude")
+def identity_exclude(
+    person_id: Annotated[str, typer.Option("--person")],
+    face_id: Annotated[str, typer.Option("--face")],
+    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
+) -> None:
+    """Record an explicit hard-negative face for a named person."""
+    _assign_identity(person_id, face_id, "negative", workspace)
+
+
+@identity_app.command("assertions")
+def identity_assertions(
+    person_id: Annotated[str, typer.Option("--person")],
+    history: Annotated[bool, typer.Option("--history/--active")] = False,
+    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
+) -> None:
+    """List a person's identity assertions, active ones by default."""
 
     _, catalog = _catalog(workspace)
     try:
         with ReviewStore(catalog.connection) as review:
-            rows = review.list_references(target_id, kind=kind)
+            rows = review.list_identity_assertions(person_id, active_only=not history)
+        payload = []
         for row in rows:
-            row.pop("embedding", None)
-            row.pop("embedding_json", None)
-        _emit(rows)
+            item = dict(row)
+            item.pop("embedding", None)
+            item.pop("embedding_json", None)
+            item.pop("reference_id", None)
+            item.pop("media_id", None)
+            item.pop("kind", None)
+            payload.append(item)
+        _emit(payload)
+    finally:
+        catalog.close()
+
+
+@identity_app.command("conflicts")
+def identity_conflicts(
+    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
+) -> None:
+    """List unresolved identity conflicts with assertion IDs to reconcile."""
+
+    _, catalog = _catalog(workspace)
+    try:
+        with ReviewStore(catalog.connection) as review:
+            rows = review.identity_conflicts()
+        payload = []
+        for row in rows:
+            item = dict(row)
+            try:
+                assertion_ids = json.loads(item.get("assertion_ids_json", "[]"))
+            except (TypeError, json.JSONDecodeError):
+                assertion_ids = []
+            item["assertion_ids"] = assertion_ids if isinstance(assertion_ids, list) else []
+            item["action"] = (
+                "reconcile these assertions, then retire incorrect ones with `ppr identity retire ASSERTION_ID`"
+            )
+            payload.append(item)
+        _emit(payload)
+    finally:
+        catalog.close()
+
+
+@identity_app.command("retire")
+def identity_retire(
+    assertion_id: str,
+    workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
+) -> None:
+    """Retire one identity assertion while preserving its event history."""
+
+    _, catalog = _catalog(workspace)
+    try:
+        with ReviewStore(catalog.connection) as review:
+            review.retire_identity_assertion(assertion_id)
+        _emit({"assertion_id": assertion_id, "event": "retired"})
     finally:
         catalog.close()
 
@@ -335,8 +446,8 @@ def analyze(
 
 @app.command("rank")
 def rank(
-    target_id: Annotated[str, typer.Option("--target")],
     batch_id: Annotated[str, typer.Option("--batch")],
+    person_id: Annotated[str, typer.Option("--person")],
     min_face_area_ratio: Annotated[
         float,
         typer.Option(
@@ -348,24 +459,16 @@ def rank(
     ] = 0.0005,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
-    """Rank a batch from persistent approved face references; never create decisions."""
+    """Rank a batch for a selected person; never create decisions."""
 
     _, catalog = _catalog(workspace)
     try:
+        _require_person(catalog, person_id)
+        _raise_for_person_conflicts(catalog, person_id)
         repository = CatalogAnalysisRepository(catalog)
         records = repository.batch_photo_records(batch_id)
         photo_dimensions = {str(record["photo_id"]): (record.get("width"), record.get("height")) for record in records}
         with ReviewStore(catalog.connection) as review:
-            positive = [
-                (str(row["reference_id"]), tuple(row["embedding"]))
-                for row in review.list_references(target_id, kind="positive")
-                if row.get("embedding")
-            ]
-            negative = [
-                (str(row["reference_id"]), tuple(row["embedding"]))
-                for row in review.list_references(target_id, kind="negative")
-                if row.get("embedding")
-            ]
             face_rows = repository.latest_face_observations(batch_id)
             faces: dict[str, list[FaceObservation]] = {}
             for row in face_rows:
@@ -393,34 +496,28 @@ def rank(
                     detector_version="persisted",
                 )
                 faces.setdefault(photo_id, []).append(face)
-            reviewable_faces = {
-                photo_id: _reviewable_faces(
-                    photo_faces,
-                    photo_width=photo_dimensions.get(photo_id, (None, None))[0],
-                    photo_height=photo_dimensions.get(photo_id, (None, None))[1],
-                    min_face_area_ratio=min_face_area_ratio,
-                )
-                for photo_id, photo_faces in faces.items()
-            }
-            scores = rank_candidates(
-                score_candidate(
+            results = [
+                AnalysisResult(
                     media_id=str(record["photo_id"]),
                     batch_id=batch_id,
-                    faces=reviewable_faces.get(str(record["photo_id"]), ()),
-                    positive_face_references=positive,
-                    negative_face_references=negative,
-                    metadata={"min_face_area_ratio": min_face_area_ratio},
+                    faces=tuple(
+                        _reviewable_faces(
+                            faces.get(str(record["photo_id"]), []),
+                            photo_width=photo_dimensions.get(str(record["photo_id"]), (None, None))[0],
+                            photo_height=photo_dimensions.get(str(record["photo_id"]), (None, None))[1],
+                            min_face_area_ratio=min_face_area_ratio,
+                        )
+                    ),
                 )
                 for record in records
-            )
-            run_id = review.save_scores(target_id, scores)
+            ]
+            scores = rank_for_person(person_id, results, cast(Any, review))
+            run_id = review.save_scores(person_id, scores)
         _emit(
             {
                 "run_id": run_id,
-                "target_id": target_id,
+                "person_id": person_id,
                 "batch_id": batch_id,
-                "positive_references": len(positive),
-                "negative_references": len(negative),
                 "min_face_area_ratio": min_face_area_ratio,
                 "candidates": [score.as_dict() for score in scores],
             }
@@ -483,19 +580,21 @@ def list_batches(
 
 @app.command("decide")
 def decide(
-    target_id: str,
     decision: str,
     photo_ids: Annotated[list[str], typer.Argument()],
+    person_id: Annotated[str, typer.Option("--person")],
     actor: Annotated[str, typer.Option("--actor")] = "user",
+    note: Annotated[str | None, typer.Option("--note", help="Preserve the user's exact free-form context.")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
-    """Append an accept, reject, or unsure event for one or more photos."""
+    """Append a photo decision, optionally preserving the user's exact note."""
 
     if actor != "user":
         raise typer.BadParameter("ppr decide records authoritative user decisions; --actor must be user")
     _, catalog = _catalog(workspace)
     try:
-        tag_name = f"person:{target_id}:presence"
+        _require_person(catalog, person_id)
+        tag_name = f"person:{person_id}:presence"
         tag_row = catalog.connection.execute("SELECT tag_id FROM tag_definitions WHERE name=?", (tag_name,)).fetchone()
         tag_id = (
             str(tag_row["tag_id"])
@@ -507,22 +606,24 @@ def decide(
         )
         decision_ids: list[int] = []
         assignment_ids: list[int] = []
+        evidence = {"note": note} if note is not None else None
         for photo_id in photo_ids:
-            decision_ids.append(catalog.record_decision(target_id, photo_id, decision, actor=actor))
+            decision_ids.append(catalog.record_decision(person_id, photo_id, decision, actor=actor, evidence=evidence))
             assignment_ids.append(
                 catalog.assign_tag(
                     photo_id,
                     tag_id,
                     provenance=actor,
                     value=decision,
-                    target_id=target_id,
+                    person_id=person_id,
                 )
             )
         _emit(
             {
-                "target_id": target_id,
+                "person_id": person_id,
                 "decision": decision,
                 "actor": actor,
+                "note": note,
                 "photo_ids": photo_ids,
                 "decision_ids": decision_ids,
                 "tag_assignment_ids": assignment_ids,
@@ -534,9 +635,9 @@ def decide(
 
 @app.command("export")
 def export_catalog(
+    person_id: Annotated[str, typer.Option("--person")],
     output: Annotated[Path, typer.Option("--output")],
     format: Annotated[str, typer.Option("--format")] = "hardlinks",
-    target_id: Annotated[str | None, typer.Option("--target")] = None,
     filename_prefix: Annotated[str | None, typer.Option("--filename-prefix")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
@@ -544,28 +645,19 @@ def export_catalog(
 
     _, catalog = _catalog(workspace)
     try:
+        _require_person(catalog, person_id)
         if format == "json":
-            rows = catalog_rows(catalog.connection, target_id=target_id)
+            rows = catalog_rows(catalog.connection, person_id=person_id)
             written = write_json(output, rows)
             _emit({"path": str(written.resolve()), "format": format, "row_count": len(rows)})
         elif format == "csv":
-            rows = catalog_rows(catalog.connection, target_id=target_id)
+            rows = catalog_rows(catalog.connection, person_id=person_id)
             written = write_csv(output, rows)
             _emit({"path": str(written.resolve()), "format": format, "row_count": len(rows)})
         elif format == "symlinks":
-            if target_id is None:
-                raise typer.BadParameter("--target is required when --format symlinks")
-            target = catalog.connection.execute("SELECT 1 FROM targets WHERE target_id=?", (target_id,)).fetchone()
-            if target is None:
-                raise typer.BadParameter(f"unknown target: {target_id}")
-            _emit(write_symlinks(catalog.connection, target_id, output, filename_prefix=filename_prefix))
+            _emit(write_person_symlinks(catalog.connection, person_id, output, filename_prefix=filename_prefix))
         elif format == "hardlinks":
-            if target_id is None:
-                raise typer.BadParameter("--target is required when --format hardlinks")
-            target = catalog.connection.execute("SELECT 1 FROM targets WHERE target_id=?", (target_id,)).fetchone()
-            if target is None:
-                raise typer.BadParameter(f"unknown target: {target_id}")
-            _emit(write_hardlinks(catalog.connection, target_id, output, filename_prefix=filename_prefix))
+            _emit(write_person_hardlinks(catalog.connection, person_id, output, filename_prefix=filename_prefix))
         else:
             raise typer.BadParameter("--format must be json, csv, hardlinks, or symlinks")
     finally:
@@ -575,7 +667,7 @@ def export_catalog(
 def _packet_media(
     catalog: Catalog,
     batch_id: str,
-    target_id: str,
+    person_id: str,
     limit: int,
     strategy: str,
 ) -> list[ReviewMedia]:
@@ -605,10 +697,10 @@ def _packet_media(
         f"""WITH candidates AS (
                SELECT p.photo_id,p.capture_time,sf.path,
                       (SELECT d.decision FROM decisions d
-                       WHERE d.target_id=? AND d.photo_id=p.photo_id
+                       WHERE d.person_id=? AND d.photo_id=p.photo_id
                        ORDER BY d.decision_id DESC LIMIT 1) latest_decision,
                       (SELECT cs.score FROM candidate_scores cs
-                       WHERE cs.target_id=? AND cs.photo_id=p.photo_id AND cs.batch_id=bp.batch_id
+                       WHERE cs.person_id=? AND cs.photo_id=p.photo_id AND cs.batch_id=bp.batch_id
                        ORDER BY cs.score_id DESC LIMIT 1) latest_score,
                       (SELECT MAX(f.quality * f.width * f.height /
                                       MAX(1.0, p.width * p.height))
@@ -633,7 +725,7 @@ def _packet_media(
            ) SELECT photo_id,capture_time,path FROM candidates
              WHERE {decision_filters[strategy]}{extra_filter}
              ORDER BY {order_by},photo_id LIMIT ?""",
-        (target_id, target_id, batch_id, limit),
+        (person_id, person_id, batch_id, limit),
     ).fetchall()
     from datetime import datetime
 
@@ -649,8 +741,8 @@ def _packet_media(
 
 @review_app.command("packet")
 def review_packet(
-    target_id: Annotated[str, typer.Option("--target")],
     batch_id: Annotated[str, typer.Option("--batch")],
+    person_id: Annotated[str, typer.Option("--person")],
     strategy: Annotated[str, typer.Option("--strategy")] = "reference-seeding",
     limit: Annotated[int, typer.Option("--limit", min=1, max=50)] = 12,
     output: Annotated[Path | None, typer.Option("--output")] = None,
@@ -660,7 +752,8 @@ def review_packet(
 
     _, catalog = _catalog(workspace)
     try:
-        media = _packet_media(catalog, batch_id, target_id, limit, strategy)
+        _require_person(catalog, person_id)
+        media = _packet_media(catalog, batch_id, person_id, limit, strategy)
         repository = CatalogAnalysisRepository(catalog)
         face_rows = repository.latest_face_observations(
             batch_id,

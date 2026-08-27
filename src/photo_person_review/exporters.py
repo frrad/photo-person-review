@@ -13,24 +13,23 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_LEGACY_MANAGED_SYMLINK_NAME = re.compile(r"^[0-9a-f]{64}(?:\.[^/]+)?$")
-_FRIENDLY_MANAGED_SYMLINK_NAME = re.compile(
+_MANAGED_LINK_NAME = re.compile(
     r"^[a-z0-9]+(?:_[a-z0-9]+)*_(?:\d{4}-\d{2}-\d{2}_\d{6}|undated)_[0-9a-f]{64}(?:\.[a-z0-9]{1,10})?$"
 )
 _SAFE_PREFIX_COMPONENT = re.compile(r"[a-z0-9]+")
 _SAFE_EXTENSION = re.compile(r"^\.[a-z0-9]{1,10}$")
-# Keep the historical filename so an existing symlink export can be upgraded
-# in place.  The manifest is now shared by both link formats.
+# The ownership manifest has a historical filename shared by both link formats.
 _EXPORT_MANIFEST_NAME = ".ppr-symlink-export.json"
-_SYMLINK_MANIFEST_NAME = _EXPORT_MANIFEST_NAME
 
 
 def catalog_rows(
     connection: sqlite3.Connection,
     *,
-    target_id: str | None = None,
+    person_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return one current catalog row per photo with append-only history summarized."""
+
+    selected_id = person_id
 
     photos = connection.execute("SELECT * FROM photos ORDER BY photo_id").fetchall()
     result: list[dict[str, Any]] = []
@@ -46,7 +45,7 @@ def catalog_rows(
             (photo_id,),
         ).fetchall()
         tag_rows = connection.execute(
-            """SELECT td.name,ta.value,ta.provenance,ta.confidence,ta.target_id,ta.created_at
+            """SELECT td.name,ta.value,ta.provenance,ta.confidence,ta.person_id,ta.created_at
                FROM tag_assignments ta JOIN tag_definitions td ON td.tag_id=ta.tag_id
                WHERE ta.photo_id=? ORDER BY ta.assignment_id""",
             (photo_id,),
@@ -60,11 +59,11 @@ def catalog_rows(
             (photo_id,),
         ).fetchall()
         decision = None
-        if target_id is not None:
+        if selected_id is not None:
             decision_row = connection.execute(
                 """SELECT decision,actor,evidence_json,created_at FROM decisions
-                   WHERE target_id=? AND photo_id=? ORDER BY decision_id DESC LIMIT 1""",
-                (target_id, photo_id),
+                   WHERE person_id=? AND photo_id=? ORDER BY decision_id DESC LIMIT 1""",
+                (selected_id, photo_id),
             ).fetchone()
             if decision_row is not None:
                 decision = {
@@ -91,7 +90,7 @@ def catalog_rows(
                 },
                 "tags": [dict(row) for row in tag_rows],
                 "sources": [dict(row) for row in source_rows],
-                "target_id": target_id,
+                "person_id": selected_id,
                 "decision": decision,
             }
         )
@@ -135,7 +134,7 @@ def write_csv(path: str | Path, rows: list[dict[str, Any]]) -> Path:
         "metadata",
         "tags",
         "sources",
-        "target_id",
+        "person_id",
         "decision",
     )
 
@@ -155,7 +154,10 @@ def write_csv(path: str | Path, rows: list[dict[str, Any]]) -> Path:
     return _atomic_text(destination, writer)
 
 
-def current_positive_sources(connection: sqlite3.Connection, target_id: str) -> list[dict[str, Any]]:
+def current_positive_sources(
+    connection: sqlite3.Connection,
+    person_id: str,
+) -> list[dict[str, Any]]:
     """Return current positive photos and their newest available source paths.
 
     A photo is current when it has an active positive face reference or its
@@ -164,26 +166,27 @@ def current_positive_sources(connection: sqlite3.Connection, target_id: str) -> 
     replaced observation is selected without opening the source file.
     """
 
+    selected_id = person_id
     rows = connection.execute(
         """WITH latest_reference_events AS (
-                   SELECT reference_id,event,
+                   SELECT assertion_id,event,
                           ROW_NUMBER() OVER (
-                              PARTITION BY reference_id ORDER BY event_id DESC
+                              PARTITION BY assertion_id ORDER BY event_id DESC
                           ) AS row_number
-                   FROM target_reference_events
+                   FROM face_identity_assertion_events
                ), active_positive AS (
                    SELECT DISTINCT r.photo_id
-                   FROM target_references r
-                   JOIN latest_reference_events e ON e.reference_id=r.reference_id
+                   FROM face_identity_assertions r
+                   JOIN latest_reference_events e ON e.assertion_id=r.assertion_id
                        AND e.row_number=1 AND e.event='active'
-                   WHERE r.target_id=? AND r.kind='positive'
+                   WHERE r.person_id=? AND r.assertion_kind='positive'
                ), latest_decisions AS (
                    SELECT photo_id,decision,
                           ROW_NUMBER() OVER (
                               PARTITION BY photo_id ORDER BY decision_id DESC
                           ) AS row_number
                    FROM decisions
-                   WHERE target_id=?
+                   WHERE person_id=?
                ), selected AS (
                    SELECT photo_id FROM active_positive
                    UNION
@@ -191,7 +194,7 @@ def current_positive_sources(connection: sqlite3.Connection, target_id: str) -> 
                    WHERE row_number=1 AND decision='accept'
                )
                SELECT p.photo_id,
-                      t.label AS target_label,
+                      t.label AS person_label,
                       p.capture_time,
                       sf.path AS source_path,
                       sf.relative_path,
@@ -207,25 +210,24 @@ def current_positive_sources(connection: sqlite3.Connection, target_id: str) -> 
                    WHERE sf2.photo_id=p.photo_id
                      AND sf2.observation_state IN ('present','replaced')
                )
-               JOIN targets t ON t.target_id=?
+               JOIN people t ON t.person_id=?
                WHERE ld.decision IS NULL OR ld.decision <> 'reject'
                ORDER BY p.photo_id""",
-        (target_id, target_id, target_id),
+        (selected_id, selected_id, selected_id),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def _managed_symlink_name(name: str, *, legacy: bool = False) -> bool:
-    """Whether *name* is a current (or explicitly legacy) managed name."""
+def _managed_link_name(name: str) -> bool:
+    """Whether *name* matches the current managed-link filename format."""
 
-    pattern = _LEGACY_MANAGED_SYMLINK_NAME if legacy else _FRIENDLY_MANAGED_SYMLINK_NAME
-    return pattern.fullmatch(name) is not None
+    return _MANAGED_LINK_NAME.fullmatch(name) is not None
 
 
-def _safe_target_prefix(label: object, target_id: str, override: object = None) -> str:
-    """Return a filesystem-safe, human-readable target or override prefix."""
+def _safe_person_prefix(label: object, person_id: str, override: object = None) -> str:
+    """Return a filesystem-safe, human-readable person or override prefix."""
 
-    values = (override, target_id, "photo") if override is not None else (label, target_id, "photo")
+    values = (override, person_id, "photo") if override is not None else (label, person_id, "photo")
     for value in values:
         components = _SAFE_PREFIX_COMPONENT.findall(str(value or "").lower())
         if components:
@@ -258,7 +260,7 @@ def _safe_extension(source_path: Path | None) -> str:
 
 
 def _read_export_manifest(
-    path: Path, target_id: str
+    path: Path, person_id: str
 ) -> tuple[set[str], dict[str, dict[str, Any]], str | None, str | None, bool]:
     """Read a prior manifest, returning names, ownership, prefix, and status."""
 
@@ -270,45 +272,40 @@ def _read_export_manifest(
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("manifest must be an object")
-        version = payload.get("version")
-        if version not in (1, 2, 3):
+        if payload.get("version") != 4:
             raise ValueError("unsupported manifest version")
-        if payload.get("target_id") != target_id:
-            raise ValueError("manifest target does not match requested target")
+        if payload.get("person_id") != person_id:
+            raise ValueError("manifest person does not match requested person")
         names = payload.get("managed_names")
         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
             raise ValueError("managed_names must be a list of strings")
-        if version == 1:
-            if any(not _managed_symlink_name(name, legacy=True) for name in names):
-                raise ValueError("managed_names contains an invalid legacy link name")
-        elif any(not _managed_symlink_name(name) for name in names):
+        if any(not _managed_link_name(name) for name in names):
             raise ValueError("managed_names contains an invalid link name")
         managed: dict[str, dict[str, Any]] = {}
-        if version >= 3:
-            payload_managed = payload.get("managed", {})
-            if not isinstance(payload_managed, dict):
-                raise ValueError("managed must be an object")
-            for name, record in payload_managed.items():
-                if not isinstance(name, str) or name not in names or not isinstance(record, dict):
-                    raise ValueError("managed contains an invalid record")
-                kind = record.get("kind")
-                if kind not in ("symlink", "hardlink"):
-                    raise ValueError("managed record has an invalid kind")
-                identity = record.get("source_identity")
-                if (
-                    not isinstance(identity, dict)
-                    or not isinstance(identity.get("dev"), int)
-                    or not isinstance(identity.get("ino"), int)
-                ):
-                    raise ValueError("managed record has an invalid source identity")
-                source_path = record.get("source_path")
-                if not isinstance(source_path, str):
-                    raise ValueError("managed record has an invalid source path")
-                managed[name] = {
-                    "kind": kind,
-                    "source_path": source_path,
-                    "source_identity": {"dev": identity["dev"], "ino": identity["ino"]},
-                }
+        payload_managed = payload.get("managed", {})
+        if not isinstance(payload_managed, dict):
+            raise ValueError("managed must be an object")
+        for name, record in payload_managed.items():
+            if not isinstance(name, str) or name not in names or not isinstance(record, dict):
+                raise ValueError("managed contains an invalid record")
+            kind = record.get("kind")
+            if kind not in ("symlink", "hardlink"):
+                raise ValueError("managed record has an invalid kind")
+            identity = record.get("source_identity")
+            if (
+                not isinstance(identity, dict)
+                or not isinstance(identity.get("dev"), int)
+                or not isinstance(identity.get("ino"), int)
+            ):
+                raise ValueError("managed record has an invalid source identity")
+            source_path = record.get("source_path")
+            if not isinstance(source_path, str):
+                raise ValueError("managed record has an invalid source path")
+            managed[name] = {
+                "kind": kind,
+                "source_path": source_path,
+                "source_identity": {"dev": identity["dev"], "ino": identity["ino"]},
+            }
         prefix = payload.get("filename_prefix")
         if prefix is not None and not isinstance(prefix, str):
             raise ValueError("filename_prefix must be a string")
@@ -368,13 +365,12 @@ def _replace_with_symlink(source_path: Path, destination_path: Path, destination
 
 def write_links(
     connection: sqlite3.Connection,
-    target_id: str,
+    person_id: str,
     output: str | Path,
     format: str = "hardlinks",
     filename_prefix: str | None = None,
-    _manifest_version: int = 3,
 ) -> dict[str, Any]:
-    """Reconcile a durable symlink or hard-link export for *target_id*.
+    """Reconcile a durable link export for a selected person.
 
     Hard links never copy bytes and require the source and destination to share
     a filesystem. Existing directories, regular files, and symlinks not listed
@@ -392,19 +388,19 @@ def write_links(
         raise ValueError(f"link export output must be a real directory: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
 
-    rows = current_positive_sources(connection, target_id)
-    target_label = rows[0].get("target_label") if rows else None
-    if target_label is None:
-        target_row = connection.execute("SELECT label FROM targets WHERE target_id=?", (target_id,)).fetchone()
-        target_label = target_row["label"] if target_row is not None else None
+    rows = current_positive_sources(connection, person_id)
+    person_label = rows[0].get("person_label") if rows else None
+    if person_label is None:
+        person_row = connection.execute("SELECT label FROM people WHERE person_id=?", (person_id,)).fetchone()
+        person_label = person_row["label"] if person_row is not None else None
     manifest_path = destination / _EXPORT_MANIFEST_NAME
     previous_names, previous_records, stored_prefix, manifest_error, manifest_writable = _read_export_manifest(
-        manifest_path, target_id
+        manifest_path, person_id
     )
     # A prefix is part of the export's identity.  Preserve it when a caller
     # omits --filename-prefix, which makes a format migration truly in-place.
     prefix_override = filename_prefix if filename_prefix is not None else stored_prefix
-    effective_prefix = _safe_target_prefix(target_label, target_id, prefix_override)
+    effective_prefix = _safe_person_prefix(person_label, person_id, prefix_override)
     desired: dict[str, dict[str, Any]] = {}
     for row in rows:
         source_value = row.get("source_path")
@@ -500,18 +496,17 @@ def write_links(
                 managed_names.add(name)
                 managed_records[name] = prior_record
             elif destination_is_symlink:
-                # v1/v2 manifests did not record ownership details.  We can
-                # upgrade a surviving symlink using its current target.
-                existing_target = destination_path.resolve(strict=False)
-                if existing_target.is_file():
+                # A surviving symlink can be re-recorded using its current source.
+                existing_source = destination_path.resolve(strict=False)
+                if existing_source.is_file():
                     try:
                         managed_names.add(name)
-                        managed_records[name] = _record("symlink", existing_target, _identity(existing_target))
+                        managed_records[name] = _record("symlink", existing_source, _identity(existing_source))
                     except OSError:
                         pass
 
-        # A v3 hardlink record proves that a regular destination is ours.  It
-        # is the only case in which a regular file may be replaced or removed.
+        # A manifest hardlink record proves that a regular destination is ours.
+        # It is the only case in which a regular file may be replaced or removed.
         owned_regular = (
             destination_is_regular
             and prior_record is not None
@@ -641,8 +636,8 @@ def write_links(
             continue
         prior_record = previous_records.get(candidate.name)
         if candidate.is_symlink():
-            # v1/v2 manifests only owned symlinks.  A v3 hardlink record does
-            # not authorize deleting a symlink that replaced that hardlink.
+            # A hardlink record does not authorize deleting a symlink that
+            # replaced that hardlink.
             if prior_record is not None and prior_record.get("kind") == "hardlink":
                 continue
             candidate.unlink()
@@ -656,19 +651,16 @@ def write_links(
             removed += 1
 
     if manifest_writable:
-        if _manifest_version >= 3:
-            # A legacy entry whose source disappeared cannot be upgraded with
-            # a trustworthy inode record.  Leave the file in place but do not
-            # claim ownership over it in the v3 manifest.
-            managed_names.intersection_update(managed_records)
+        # A source that disappeared cannot be upgraded with a trustworthy inode
+        # record. Leave it in place but do not claim ownership in the manifest.
+        managed_names.intersection_update(managed_records)
         manifest_payload = {
-            "version": _manifest_version,
-            "target_id": target_id,
+            "version": 4,
+            "person_id": person_id,
             "filename_prefix": effective_prefix,
             "managed_names": sorted(managed_names),
         }
-        if _manifest_version >= 3:
-            manifest_payload["managed"] = {name: managed_records[name] for name in sorted(managed_records)}
+        manifest_payload["managed"] = {name: managed_records[name] for name in sorted(managed_records)}
 
         def write_manifest(stream: Any) -> None:
             json.dump(manifest_payload, stream, sort_keys=True, separators=(",", ":"))
@@ -679,7 +671,7 @@ def write_links(
     return {
         "path": str(destination.resolve()),
         "format": format,
-        "target_id": target_id,
+        "person_id": person_id,
         "filename_prefix": effective_prefix,
         "row_count": len(rows),
         "desired_count": len(desired),
@@ -700,32 +692,34 @@ def write_links(
     }
 
 
-def write_symlinks(
+def write_person_symlinks(
     connection: sqlite3.Connection,
-    target_id: str,
+    person_id: str,
     output: str | Path,
     filename_prefix: str | None = None,
 ) -> dict[str, Any]:
-    """Compatibility wrapper for the original symlink exporter."""
-
-    # Keep the original v2 symlink manifest shape for compatibility.  Hardlink
-    # exports use v3, which adds inode ownership records.
+    """Reconcile a person-centric symlink export."""
     return write_links(
         connection,
-        target_id,
+        person_id,
         output,
         format="symlinks",
         filename_prefix=filename_prefix,
-        _manifest_version=2,
     )
 
 
-def write_hardlinks(
+def write_person_hardlinks(
     connection: sqlite3.Connection,
-    target_id: str,
+    person_id: str,
     output: str | Path,
     filename_prefix: str | None = None,
 ) -> dict[str, Any]:
-    """Reconcile an ordinary-file export made from hard links."""
+    """Reconcile an ordinary-file person export made from hard links."""
 
-    return write_links(connection, target_id, output, format="hardlinks", filename_prefix=filename_prefix)
+    return write_links(
+        connection,
+        person_id,
+        output,
+        format="hardlinks",
+        filename_prefix=filename_prefix,
+    )
