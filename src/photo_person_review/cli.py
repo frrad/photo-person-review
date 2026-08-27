@@ -537,6 +537,7 @@ def export_catalog(
     output: Annotated[Path, typer.Option("--output")],
     format: Annotated[str, typer.Option("--format")] = "json",
     target_id: Annotated[str | None, typer.Option("--target")] = None,
+    filename_prefix: Annotated[str | None, typer.Option("--filename-prefix")] = None,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
     """Export catalog metadata or reconcile a durable symlink photo export."""
@@ -557,7 +558,7 @@ def export_catalog(
             target = catalog.connection.execute("SELECT 1 FROM targets WHERE target_id=?", (target_id,)).fetchone()
             if target is None:
                 raise typer.BadParameter(f"unknown target: {target_id}")
-            _emit(write_symlinks(catalog.connection, target_id, output))
+            _emit(write_symlinks(catalog.connection, target_id, output, filename_prefix=filename_prefix))
         else:
             raise typer.BadParameter("--format must be json, csv, or symlinks")
     finally:

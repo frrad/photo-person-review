@@ -8,10 +8,15 @@ import os
 import re
 import sqlite3
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_MANAGED_SYMLINK_NAME = re.compile(r"^[0-9a-f]{64}(?:\.[^/]+)?$")
+_LEGACY_MANAGED_SYMLINK_NAME = re.compile(r"^[0-9a-f]{64}(?:\.[^/]+)?$")
+_FRIENDLY_MANAGED_SYMLINK_NAME = re.compile(
+    r"^[a-z0-9]+(?:_[a-z0-9]+)*_(?:\d{4}-\d{2}-\d{2}_\d{6}|undated)_[0-9a-f]{64}(?:\.[a-z0-9]{1,10})?$"
+)
+_SAFE_PREFIX_COMPONENT = re.compile(r"[a-z0-9]+")
 _SAFE_EXTENSION = re.compile(r"^\.[a-z0-9]{1,10}$")
 _SYMLINK_MANIFEST_NAME = ".ppr-symlink-export.json"
 
@@ -182,6 +187,8 @@ def current_positive_sources(connection: sqlite3.Connection, target_id: str) -> 
                    WHERE row_number=1 AND decision='accept'
                )
                SELECT p.photo_id,
+                      t.label AS target_label,
+                      p.capture_time,
                       sf.path AS source_path,
                       sf.relative_path,
                       sf.source_id,
@@ -196,17 +203,45 @@ def current_positive_sources(connection: sqlite3.Connection, target_id: str) -> 
                    WHERE sf2.photo_id=p.photo_id
                      AND sf2.observation_state IN ('present','replaced')
                )
+               JOIN targets t ON t.target_id=?
                WHERE ld.decision IS NULL OR ld.decision <> 'reject'
                ORDER BY p.photo_id""",
-        (target_id, target_id),
+        (target_id, target_id, target_id),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def _managed_symlink_name(name: str) -> bool:
-    """Whether *name* is one of the hash-plus-extension names we manage."""
+def _managed_symlink_name(name: str, *, legacy: bool = False) -> bool:
+    """Whether *name* is a current (or explicitly legacy) managed name."""
 
-    return _MANAGED_SYMLINK_NAME.fullmatch(name) is not None
+    pattern = _LEGACY_MANAGED_SYMLINK_NAME if legacy else _FRIENDLY_MANAGED_SYMLINK_NAME
+    return pattern.fullmatch(name) is not None
+
+
+def _safe_target_prefix(label: object, target_id: str, override: object = None) -> str:
+    """Return a filesystem-safe, human-readable target or override prefix."""
+
+    values = (override, target_id, "photo") if override is not None else (label, target_id, "photo")
+    for value in values:
+        components = _SAFE_PREFIX_COMPONENT.findall(str(value or "").lower())
+        if components:
+            return "_".join(components)
+    return "photo"
+
+
+def _capture_stamp(value: object) -> str:
+    """Format a catalog capture time, using a stable marker when unusable."""
+
+    if value is None:
+        return "undated"
+    raw = str(value).strip()
+    if not raw:
+        return "undated"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return "undated"
+    return parsed.strftime("%Y-%m-%d_%H%M%S")
 
 
 def _safe_extension(source_path: Path | None) -> str:
@@ -227,14 +262,18 @@ def _read_symlink_manifest(path: Path, target_id: str) -> tuple[set[str], str | 
         return set(), "manifest path is not a regular file", False
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict) or payload.get("version") != 1:
+        version = payload.get("version") if isinstance(payload, dict) else None
+        if version not in (1, 2):
             raise ValueError("unsupported manifest version")
         if payload.get("target_id") != target_id:
             raise ValueError("manifest target does not match requested target")
         names = payload.get("managed_names")
         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
             raise ValueError("managed_names must be a list of strings")
-        if any(not _managed_symlink_name(name) for name in names):
+        if version == 1:
+            if any(not _managed_symlink_name(name, legacy=True) for name in names):
+                raise ValueError("managed_names contains an invalid legacy link name")
+        elif any(not _managed_symlink_name(name) for name in names):
             raise ValueError("managed_names contains an invalid link name")
         return set(names), None, True
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -245,10 +284,11 @@ def write_symlinks(
     connection: sqlite3.Connection,
     target_id: str,
     output: str | Path,
+    filename_prefix: str | None = None,
 ) -> dict[str, Any]:
     """Reconcile a durable symlink export for *target_id*.
 
-    The export contains symlinks named ``<full-photo-id><extension>`` plus a
+    The export contains symlinks named ``<target>_<capture-time>_<photo-id><extension>`` plus a
     small hidden ownership manifest. Existing directories, regular files, and
     symlinks not listed in that manifest are left untouched. Managed links can
     be updated atomically, while stale managed links are removed. Neither
@@ -261,6 +301,11 @@ def write_symlinks(
     destination.mkdir(parents=True, exist_ok=True)
 
     rows = current_positive_sources(connection, target_id)
+    target_label = rows[0].get("target_label") if rows else None
+    if target_label is None:
+        target_row = connection.execute("SELECT label FROM targets WHERE target_id=?", (target_id,)).fetchone()
+        target_label = target_row["label"] if target_row is not None else None
+    effective_prefix = _safe_target_prefix(target_label, target_id, filename_prefix)
     manifest_path = destination / _SYMLINK_MANIFEST_NAME
     previous_names, manifest_error, manifest_writable = _read_symlink_manifest(manifest_path, target_id)
     desired: dict[str, dict[str, Any]] = {}
@@ -268,7 +313,8 @@ def write_symlinks(
         source_value = row.get("source_path")
         source_path = Path(str(source_value)).expanduser() if source_value else None
         suffix = _safe_extension(source_path)
-        name = f"{row['photo_id']}{suffix}"
+        stamp = _capture_stamp(row.get("capture_time"))
+        name = f"{effective_prefix}_{stamp}_{str(row['photo_id']).lower()}{suffix}"
         # A photo should have one newest source row, but keep reconciliation
         # deterministic if a malformed catalog yields duplicate names.
         desired.setdefault(name, {**row, "destination_name": name})
@@ -359,8 +405,9 @@ def write_symlinks(
 
     if manifest_writable:
         manifest_payload = {
-            "version": 1,
+            "version": 2,
             "target_id": target_id,
+            "filename_prefix": effective_prefix,
             "managed_names": sorted(managed_names),
         }
 
@@ -374,6 +421,7 @@ def write_symlinks(
         "path": str(destination.resolve()),
         "format": "symlinks",
         "target_id": target_id,
+        "filename_prefix": effective_prefix,
         "row_count": len(rows),
         "desired_count": len(desired),
         "managed_count": len(managed_names),

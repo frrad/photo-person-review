@@ -122,16 +122,25 @@ directory, reconciled after imports and the latest decisions:
 
 ```console
 uv run ppr export --target TARGET_ID --format symlinks \
-  --output "$HOME/photos/chloevidigami"
+  --output "$HOME/Pictures/chloevidigami" \
+  --filename-prefix ppr_chloevidigami
 ```
 
-The destination is created if absent. Managed links are named with the full
-stable `photo_id` and current source extension (`<photo_id>.jpg`). The current
-set is the union of active positive face-reference photos and latest `accept`
+The destination is created if absent. Managed links are named with the
+sanitized filename prefix, capture timestamp, full stable `photo_id`, and
+current source extension
+(`ppr_chloevidigami_2026-08-26_092328_<photo_id>.jpg`). The current set is the union of active positive face-reference photos and latest `accept`
 decisions, except that a latest `reject` excludes the photo even when it has
 older acceptance evidence. Re-running follows the newest present/replaced
 source observation, adds new links, updates changed links, and removes stale
 managed links.
+
+`--filename-prefix` is optional. Its value is lowercased and reduced to
+`[a-z0-9]+` components joined by underscores. Without it, the target label is
+used, falling back to the target ID or `photo`. Missing or invalid
+`capture_time` values use `undated`. The manifest stores the effective prefix;
+changing it safely migrates prior managed names on the next sync while
+preserving unknown links.
 
 The command creates symlinks plus a small hidden ownership manifest; it never
 copies or opens photo bytes. Missing source paths and regular-file/directory

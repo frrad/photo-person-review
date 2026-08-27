@@ -48,8 +48,8 @@ def test_symlink_export_unions_current_positive_references_and_accepts(tmp_path:
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
         source_id = catalog.create_source("folder")
         run_id = catalog.create_import_run(source_id)
-        first_id = catalog.upsert_photo("a" * 64)
-        accepted_id = catalog.upsert_photo("b" * 64)
+        first_id = catalog.upsert_photo("a" * 64, capture_time="2026-08-26T09:23:28")
+        accepted_id = catalog.upsert_photo("b" * 64, capture_time="not-a-time")
         rejected_id = catalog.upsert_photo("c" * 64)
         for photo_id, path in (
             (first_id, first_source),
@@ -57,7 +57,7 @@ def test_symlink_export_unions_current_positive_references_and_accepts(tmp_path:
             (rejected_id, rejected_source),
         ):
             catalog.observe_source_file(source_id, photo_id, str(path), import_run_id=run_id)
-        target_id = catalog.create_target("chloe")
+        target_id = catalog.create_target("chloe", label="Chloé Vidigami")
         with ReviewStore(catalog.connection) as review:
             review.add_reference(target_id, media_id=first_id, kind="positive")
             review.add_reference(target_id, media_id=rejected_id, kind="positive")
@@ -69,12 +69,52 @@ def test_symlink_export_unions_current_positive_references_and_accepts(tmp_path:
 
     assert result["row_count"] == 2
     assert result["created_count"] == 2
-    assert (destination / f"{first_id}.jpg").resolve() == first_source.resolve()
-    assert (destination / f"{accepted_id}.png").resolve() == accepted_source.resolve()
-    assert not (destination / f"{rejected_id}.jpg").exists()
+    first_name = f"chlo_vidigami_2026-08-26_092328_{first_id}.jpg"
+    accepted_name = f"chlo_vidigami_undated_{accepted_id}.png"
+    assert (destination / first_name).resolve() == first_source.resolve()
+    assert (destination / accepted_name).resolve() == accepted_source.resolve()
+    assert not any(path.name.startswith(rejected_id) for path in destination.iterdir())
     manifest = json.loads((destination / ".ppr-symlink-export.json").read_text(encoding="utf-8"))
     assert manifest["target_id"] == "chloe"
-    assert sorted(manifest["managed_names"]) == sorted((f"{first_id}.jpg", f"{accepted_id}.png"))
+    assert manifest["version"] == 2
+    assert manifest["filename_prefix"] == "chlo_vidigami"
+    assert sorted(manifest["managed_names"]) == sorted((first_name, accepted_name))
+
+
+def test_symlink_export_migrates_legacy_hash_links_and_honors_prefix(tmp_path: Path) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"placeholder")
+    photo_id = "a" * 64
+    old_name = f"{photo_id}.jpg"
+    with Catalog(tmp_path / "catalog.sqlite3") as catalog:
+        source_id = catalog.create_source("folder")
+        run_id = catalog.create_import_run(source_id)
+        catalog.upsert_photo(photo_id, capture_time="2026-08-26T09:23:28")
+        catalog.observe_source_file(source_id, photo_id, str(source), import_run_id=run_id)
+        target_id = catalog.create_target("chloe", label="Chloe")
+        catalog.record_decision(target_id, photo_id, "accept")
+        destination = tmp_path / "export"
+        destination.mkdir()
+        os.symlink(source, destination / old_name)
+        (destination / ".ppr-symlink-export.json").write_text(
+            json.dumps({"version": 1, "target_id": target_id, "managed_names": [old_name]}) + "\n",
+            encoding="utf-8",
+        )
+        unknown = destination / ("f" * 64 + ".jpg")
+        os.symlink(source, unknown)
+
+        result = write_symlinks(catalog.connection, target_id, destination, filename_prefix="PPR Chloe Vidigami")
+
+    new_name = f"ppr_chloe_vidigami_2026-08-26_092328_{photo_id}.jpg"
+    assert not (destination / old_name).exists()
+    assert (destination / new_name).resolve() == source.resolve()
+    assert unknown.is_symlink()
+    assert result["removed_count"] == 1
+    assert result["filename_prefix"] == "ppr_chloe_vidigami"
+    manifest = json.loads((destination / ".ppr-symlink-export.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == 2
+    assert manifest["filename_prefix"] == "ppr_chloe_vidigami"
+    assert manifest["managed_names"] == [new_name]
 
 
 def test_symlink_export_reconciles_only_managed_links_and_preserves_collisions(tmp_path: Path) -> None:
@@ -85,7 +125,7 @@ def test_symlink_export_reconciles_only_managed_links_and_preserves_collisions(t
     with Catalog(tmp_path / "catalog.sqlite3") as catalog:
         source_id = catalog.create_source("folder")
         run_id = catalog.create_import_run(source_id)
-        photo_id = catalog.upsert_photo("d" * 64)
+        photo_id = catalog.upsert_photo("d" * 64, capture_time="2026-08-26T09:23:28")
         stale_id = catalog.upsert_photo("e" * 64)
         collision_id = catalog.upsert_photo("a" * 64)
         catalog.observe_source_file(source_id, photo_id, str(source), import_run_id=run_id)
@@ -101,18 +141,21 @@ def test_symlink_export_reconciles_only_managed_links_and_preserves_collisions(t
         os.symlink(source, arbitrary_link)
         unknown_hash_link = destination / f"{'f' * 64}.jpg"
         os.symlink(source, unknown_hash_link)
-        unmanaged_desired_link = destination / f"{photo_id}.jpg"
+        managed_photo_name = f"chloe_2026-08-26_092328_{photo_id}.jpg"
+        managed_stale_name = f"chloe_undated_{stale_id}.jpg"
+        managed_collision_name = f"chloe_undated_{collision_id}.png"
+        unmanaged_desired_link = destination / managed_photo_name
         unmanaged_source = tmp_path / "unmanaged.jpg"
         unmanaged_source.write_bytes(b"unmanaged")
         os.symlink(unmanaged_source, unmanaged_desired_link)
-        regular_collision = destination / f"{collision_id}.png"
+        regular_collision = destination / managed_collision_name
         regular_collision.write_bytes(b"keep")
 
         write_symlinks(catalog.connection, target_id, destination)
         catalog.record_decision(target_id, stale_id, "reject")
         result = write_symlinks(catalog.connection, target_id, destination)
 
-        assert not (destination / f"{stale_id}.jpg").exists()
+        assert not (destination / managed_stale_name).exists()
         assert arbitrary_link.is_symlink()
         assert unknown_hash_link.is_symlink()
         assert unmanaged_desired_link.resolve() == unmanaged_source.resolve()

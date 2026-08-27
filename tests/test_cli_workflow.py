@@ -159,12 +159,16 @@ def test_cli_incremental_review_workflow_is_metadata_only(tmp_path):
                 "symlinks",
                 "--target",
                 "child",
+                "--filename-prefix",
+                "PPR Child Export",
                 *workspace_arg,
             ],
         )
     )
     assert symlink_export["created_count"] == 1
-    exported_link = symlink_dir / f"{photo_id}.jpg"
+    exported_links = list(symlink_dir.glob(f"ppr_child_export_*_{photo_id}.jpg"))
+    assert len(exported_links) == 1
+    exported_link = exported_links[0]
     assert exported_link.is_symlink()
     assert exported_link.resolve() == photo.resolve()
     assert (symlink_dir / ".ppr-symlink-export.json").is_file()

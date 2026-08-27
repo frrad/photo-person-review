@@ -45,7 +45,8 @@ ppr review packet --target target-1 --strategy reference-seeding --output "$TMPD
 ppr decide --target target-1 --accept PHOTO_ID --actor user
 ppr export --target target-1 --format json
 # Reconcile the durable, going-forward photo export.
-ppr export --target target-1 --format symlinks --output "$HOME/photos/chloevidigami"
+ppr export --target target-1 --format symlinks --output "$HOME/Pictures/chloevidigami" \
+  --filename-prefix ppr_chloevidigami
 ```
 
 The exact command surface is under active implementation. Commands intended for
@@ -55,11 +56,19 @@ agent use emit stable JSON on standard output and diagnostics on standard error.
 
 Use `--format symlinks` for a persistent export that can be consumed by a photo
 viewer or another local workflow. The output directory is created if needed and
-contains links named from the full stable photo ID plus the current source
-extension, for example `0123...cdef.jpg`, along with a small hidden ownership
-manifest. Re-running the command reconciles
+contains links named with a sanitized prefix, capture timestamp, full stable
+photo ID, and current source extension, for example
+`ppr_chloevidigami_2026-08-26_092328_0123...cdef.jpg`, along with a small hidden
+ownership manifest. Re-running the command reconciles
 these managed links with the current target positives: new links are added,
 changed source paths are updated, and stale managed links are removed.
+
+Pass `--filename-prefix` to namespace the export for exact filename searches;
+the value is lowercased and reduced to `[a-z0-9]+` components joined by
+underscores. If omitted, the target label is used, falling back to the target
+ID or `photo`. Invalid or missing capture times use `undated`. The manifest
+records the effective prefix, and changing it migrates the prior managed names
+on the next sync while preserving unknown links.
 
 The current positive set is the union of active positive face references and
 the latest `accept` decisions. A photo whose latest decision is `reject` is
