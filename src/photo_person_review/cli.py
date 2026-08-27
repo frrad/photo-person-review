@@ -50,6 +50,29 @@ def _catalog(workspace: Path | None) -> tuple[CatalogConfig, Catalog]:
     return config, Catalog(config.database_path)
 
 
+def _reviewable_faces(
+    faces: list[FaceObservation],
+    *,
+    photo_width: int | None,
+    photo_height: int | None,
+    min_face_area_ratio: float,
+) -> list[FaceObservation]:
+    """Keep only faces large enough to support identity ranking.
+
+    Stored detections are immutable evidence and are intentionally untouched;
+    this filter only controls which observations are supplied to the scorer.
+    A zero threshold is an explicit exhaustive-audit mode.
+    """
+    if min_face_area_ratio == 0.0:
+        return faces
+    if not photo_width or not photo_height or photo_width <= 0 or photo_height <= 0:
+        # Unknown dimensions cannot prove that a face is unreviewably small;
+        # preserve it to favor recall.
+        return faces
+    photo_area = photo_width * photo_height
+    return [face for face in faces if (face.bbox[2] * face.bbox[3]) / photo_area >= min_face_area_ratio]
+
+
 @app.command()
 def init(workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None) -> None:
     """Create a private catalog workspace and apply schema migrations."""
@@ -304,6 +327,15 @@ def analyze(
 def rank(
     target_id: Annotated[str, typer.Option("--target")],
     batch_id: Annotated[str, typer.Option("--batch")],
+    min_face_area_ratio: Annotated[
+        float,
+        typer.Option(
+            "--min-face-area-ratio",
+            min=0.0,
+            max=1.0,
+            help="Minimum detected-face area / photo area used for identity evidence; 0 includes all faces.",
+        ),
+    ] = 0.0005,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
     """Rank a batch from persistent approved face references; never create decisions."""
@@ -311,6 +343,8 @@ def rank(
     _, catalog = _catalog(workspace)
     try:
         repository = CatalogAnalysisRepository(catalog)
+        records = repository.batch_photo_records(batch_id)
+        photo_dimensions = {str(record["photo_id"]): (record.get("width"), record.get("height")) for record in records}
         with ReviewStore(catalog.connection) as review:
             positive = [
                 (str(row["reference_id"]), tuple(row["embedding"]))
@@ -334,30 +368,40 @@ def rank(
                 embedding = (
                     tuple(float(value) for value in json.loads(feature["vector_json"])) if feature is not None else None
                 )
-                faces.setdefault(str(row["photo_id"]), []).append(
-                    FaceObservation(
-                        media_id=str(row["photo_id"]),
-                        face_id=str(row["face_id"]),
-                        bbox=(
-                            round(float(row["x"])),
-                            round(float(row["y"])),
-                            round(float(row["width"])),
-                            round(float(row["height"])),
-                        ),
-                        quality=float(row["quality"] or 0.0),
-                        embedding=embedding,
-                        detector_version="persisted",
-                    )
+                photo_id = str(row["photo_id"])
+                face = FaceObservation(
+                    media_id=photo_id,
+                    face_id=str(row["face_id"]),
+                    bbox=(
+                        round(float(row["x"])),
+                        round(float(row["y"])),
+                        round(float(row["width"])),
+                        round(float(row["height"])),
+                    ),
+                    quality=float(row["quality"] or 0.0),
+                    embedding=embedding,
+                    detector_version="persisted",
                 )
+                faces.setdefault(photo_id, []).append(face)
+            reviewable_faces = {
+                photo_id: _reviewable_faces(
+                    photo_faces,
+                    photo_width=photo_dimensions.get(photo_id, (None, None))[0],
+                    photo_height=photo_dimensions.get(photo_id, (None, None))[1],
+                    min_face_area_ratio=min_face_area_ratio,
+                )
+                for photo_id, photo_faces in faces.items()
+            }
             scores = rank_candidates(
                 score_candidate(
                     media_id=str(record["photo_id"]),
                     batch_id=batch_id,
-                    faces=faces.get(str(record["photo_id"]), ()),
+                    faces=reviewable_faces.get(str(record["photo_id"]), ()),
                     positive_face_references=positive,
                     negative_face_references=negative,
+                    metadata={"min_face_area_ratio": min_face_area_ratio},
                 )
-                for record in repository.batch_photo_records(batch_id)
+                for record in records
             )
             run_id = review.save_scores(target_id, scores)
         _emit(
@@ -367,6 +411,7 @@ def rank(
                 "batch_id": batch_id,
                 "positive_references": len(positive),
                 "negative_references": len(negative),
+                "min_face_area_ratio": min_face_area_ratio,
                 "candidates": [score.as_dict() for score in scores],
             }
         )

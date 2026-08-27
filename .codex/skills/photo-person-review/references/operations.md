@@ -59,6 +59,11 @@ uv run ppr review packet --target TARGET_ID --batch BATCH_ID \
   --strategy likely --limit 8 --output "$review_dir"
 ```
 
+The primary rank queue defaults to `--min-face-area-ratio 0.0005`, which
+defers tiny embedded portraits such as printed cubby labels. This never deletes
+detections. After the primary review, run an exhaustive low-resolution audit
+with `--min-face-area-ratio 0`; expect more printed faces and false positives.
+
 Read `packet.json`. Each `visible[].faces[]` entry supplies the exact persisted
 `face_id`, bounding box, and individual crop path. Display an individual path
 such as `faces/01-face-01.jpg`, not the dense face sheet, as the primary prompt.

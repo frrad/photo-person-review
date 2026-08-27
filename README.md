@@ -38,6 +38,9 @@ ppr analyze --batch BATCH_ID --new
 # Lower the default 0.80 threshold if a review packet misses faces.
 ppr analyze --batch BATCH_ID --new --face-threshold 0.75
 ppr target create target-1
+ppr rank --target target-1 --batch BATCH_ID
+# Later audit tiny/distant detections that the primary queue defers.
+ppr rank --target target-1 --batch BATCH_ID --min-face-area-ratio 0
 ppr review packet --target target-1 --strategy reference-seeding --output "$TMPDIR"
 ppr decide --target target-1 --accept PHOTO_ID --actor user
 ppr export --target target-1 --format json

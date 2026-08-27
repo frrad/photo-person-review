@@ -19,6 +19,7 @@ from photo_person_review.analysis import (  # noqa: E402
 )
 from photo_person_review.cli import (
     _packet_media,  # noqa: E402
+    _reviewable_faces,  # noqa: E402
     app,  # noqa: E402
 )
 from photo_person_review.db import Catalog  # noqa: E402
@@ -186,3 +187,13 @@ def test_reference_seeding_prefers_clear_few_face_photos(tmp_path: Path) -> None
         selected = _packet_media(catalog, batch, "target", 3, "reference-seeding")
 
     assert [item.media_id for item in selected] == ids
+
+
+def test_rank_face_area_filter_excludes_tiny_4k_detection_and_keeps_low_res_face() -> None:
+    tiny = FaceObservation("4k", "tiny", (0, 0, 20, 20), embedding=(1.0, 0.0))
+    low_res = FaceObservation("low-res", "large", (0, 0, 20, 20), embedding=(1.0, 0.0))
+
+    assert _reviewable_faces([tiny], photo_width=4000, photo_height=3000, min_face_area_ratio=0.0005) == []
+    assert _reviewable_faces([low_res], photo_width=40, photo_height=30, min_face_area_ratio=0.0005) == [low_res]
+    assert _reviewable_faces([tiny], photo_width=4000, photo_height=3000, min_face_area_ratio=0.0) == [tiny]
+    assert _reviewable_faces([tiny], photo_width=None, photo_height=None, min_face_area_ratio=0.0005) == [tiny]
