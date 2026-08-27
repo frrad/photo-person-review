@@ -98,27 +98,25 @@ def face_evidence(
     for face in faces:
         if face.embedding is None:
             continue
+        face_positive: tuple[float, str | None] = (0.0, None)
         for ref_id, ref in refs:
             similarity = _positive_similarity(cosine_similarity(face.embedding, ref))
             # Quality only reduces weak detections; it cannot boost evidence.
             similarity *= max(0.0, min(1.0, face.quality))
-            if similarity > best[0]:
-                best = (similarity, face.face_id, ref_id)
-    value = max(0.0, best[0])
-    # Hard negatives cap, rather than reverse, evidence. A rejected similar
-    # person should make a suggestion uncertain without forcing rejection.
-    if negs:
+            if similarity > face_positive[0]:
+                face_positive = (similarity, ref_id)
+        if face_positive[1] is None:
+            continue
+        # Apply a hard-negative cap to this face's own positive evidence. A
+        # different face in a group photo must not suppress the best match.
         negative = max(
-            (
-                _positive_similarity(cosine_similarity(face.embedding, ref))
-                for face in faces
-                if face.embedding is not None
-                for _, ref in negs
-            ),
+            (_positive_similarity(cosine_similarity(face.embedding, ref)) for _, ref in negs),
             default=0.0,
         )
-        value *= max(0.0, 1.0 - negative * 0.85)
-    return value, best[1], best[2]
+        adjusted = face_positive[0] * max(0.0, 1.0 - negative * 0.85)
+        if adjusted > best[0]:
+            best = (adjusted, face.face_id, face_positive[1])
+    return max(0.0, best[0]), best[1], best[2]
 
 
 def appearance_evidence(

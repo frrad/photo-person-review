@@ -53,6 +53,33 @@ def test_hard_negative_caps_evidence_without_making_a_decision():
     assert score.score > 0.0
 
 
+def test_hard_negative_on_another_face_does_not_suppress_positive_face():
+    score = score_candidate(
+        media_id="m1",
+        batch_id="b1",
+        faces=[
+            FaceObservation("m1", "chloe", (0, 0, 10, 10), embedding=(1.0, 0.0)),
+            FaceObservation("m1", "isabella", (20, 0, 10, 10), embedding=(0.0, 1.0)),
+        ],
+        positive_face_references=[("chloe-ref", (1.0, 0.0))],
+        negative_face_references=[("isabella-ref", (0.0, 1.0))],
+    )
+    assert score.components.face == 1.0
+    assert score.supporting_face_id == "chloe"
+    assert score.supporting_reference_id == "chloe-ref"
+
+
+def test_faces_without_positive_references_do_not_claim_support():
+    score = score_candidate(
+        media_id="m1",
+        batch_id="b1",
+        faces=[FaceObservation("m1", "face", (0, 0, 10, 10), embedding=(1.0, 0.0))],
+    )
+    assert score.components.face == 0.0
+    assert score.supporting_face_id is None
+    assert score.supporting_reference_id is None
+
+
 def test_rank_is_deterministic_for_ties():
     low = score_candidate(media_id="b", batch_id="x")
     high = score_candidate(media_id="a", batch_id="x", provider_hint=1.0)
