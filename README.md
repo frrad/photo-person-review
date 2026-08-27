@@ -30,8 +30,10 @@ directories when review is needed.
 ```console
 ppr init --workspace /private/path/to/catalog
 ppr import /private/path/to/archive --manifest /private/path/to/media.json
-ppr analyze --new
-ppr target create --id target-1
+ppr analyze --batch BATCH_ID --new
+# Lower the default 0.80 threshold if a review packet misses faces.
+ppr analyze --batch BATCH_ID --new --face-threshold 0.75
+ppr target create target-1
 ppr review packet --target target-1 --strategy reference-seeding --output "$TMPDIR"
 ppr decide --target target-1 --accept PHOTO_ID --actor user
 ppr export --target target-1 --format json

@@ -56,6 +56,10 @@ def test_opencv_analyzer_emits_boxes_landmarks_quality_and_normalized_embedding(
     assert face.embedding == (0.6, 0.8)
 
 
+def test_opencv_analyzer_defaults_to_review_oriented_recall():
+    assert OpenCVAnalyzer().face_score_threshold == 0.80
+
+
 def test_opencv_analyzer_reports_missing_model_action(tmp_path: Path):
     analyzer = OpenCVAnalyzer()
     with pytest.raises(RuntimeError, match="ppr models install"):

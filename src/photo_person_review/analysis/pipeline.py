@@ -67,7 +67,7 @@ class OpenCVAnalyzer:
         recognizer: Any | None = None,
         image_to_array: Callable[[Image.Image], Any] | None = None,
         analyzer_version: str = "yunet+sface",
-        face_score_threshold: float = 0.85,
+        face_score_threshold: float = 0.80,
     ):
         self.face_model = Path(face_model) if face_model else None
         self.recognition_model = Path(recognition_model) if recognition_model else None

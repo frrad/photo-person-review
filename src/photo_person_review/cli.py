@@ -228,6 +228,15 @@ def models_status(
 def analyze(
     batch_id: Annotated[str, typer.Option("--batch")],
     new_only: Annotated[bool, typer.Option("--new/--all")] = True,
+    face_threshold: Annotated[
+        float,
+        typer.Option(
+            "--face-threshold",
+            min=0.0,
+            max=1.0,
+            help="YuNet confidence cutoff; lower values favor recall for human review.",
+        ),
+    ] = 0.80,
     workspace: Annotated[Path | None, typer.Option("--workspace", "-w")] = None,
 ) -> None:
     """Run local YuNet/SFace analysis and append numeric evidence to the catalog."""
@@ -235,11 +244,16 @@ def analyze(
     config, catalog = _catalog(workspace)
     try:
         manager = ModelManager(config.models_dir)
-        version = f"yunet:{PINNED_MODELS['yunet'].sha256[:12]}+sface:{PINNED_MODELS['sface'].sha256[:12]}+score:0.85"
+        threshold_label = f"{face_threshold:.4f}".rstrip("0").rstrip(".")
+        version = (
+            f"yunet:{PINNED_MODELS['yunet'].sha256[:12]}+"
+            f"sface:{PINNED_MODELS['sface'].sha256[:12]}+score:{threshold_label}"
+        )
         analyzer = OpenCVAnalyzer(
             face_model=manager.path("yunet"),
             recognition_model=manager.path("sface"),
             analyzer_version=version,
+            face_score_threshold=face_threshold,
         )
         repository = CatalogAnalysisRepository(catalog)
         records = repository.batch_photo_records(
